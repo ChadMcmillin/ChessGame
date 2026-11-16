@@ -1,0 +1,62 @@
+# Gridiron Edge
+
+A mobile web app that continuously scans NFL games — before kickoff and live — and surfaces the
+best-value bets against DraftKings lines: spreads, totals, moneylines, team totals and player props.
+
+## What it does
+
+- **Best Bets** – every market is re-evaluated on each refresh (10 s while games are live, 30 s
+  otherwise) and ranked by expected value. Each card shows the DraftKings price, the model's win
+  chance, the break-even chance the price needs, the edge, and a suggested stake.
+- **Games** – live scores, possession, down and distance, and current DraftKings lines.
+- **Game tracker** – field position graphic, last play, live win probability and its chart,
+  drive-by-drive log, the full prop board, injuries, line movement and team stats.
+- **My Bets** – track any suggestion; it is followed live and graded when the game ends.
+
+## Run it
+
+It is a static site with no build step and no API keys.
+
+```
+npm start        # serves on http://localhost:8080
+npm test         # model unit tests
+```
+
+To use it on a phone, host the folder anywhere static (for example GitHub Pages: Settings → Pages →
+Deploy from a branch → `/ (root)`), open the URL, and choose "Add to Home Screen".
+
+## Data
+
+Everything comes from ESPN's public NFL feed, called directly from the browser. That feed carries
+DraftKings as its odds provider:
+
+| Data | Source |
+| --- | --- |
+| Scores, clock, possession, spread / total / moneyline with DraftKings prices | scoreboard |
+| Drives, plays, box score, win probability, injuries | game summary |
+| DraftKings prop lines (player and team) | odds `propBets` |
+| Player game logs, rosters | athlete and team endpoints |
+
+Known limits of the feed:
+
+- **Prop prices are not included**, only the lines. Over/under props are graded against an assumed
+  −114 and labelled "est. price"; touchdown scorers, yardage milestones and count props (sacks,
+  TD passes, field goals) show a *fair price* instead of a grade. Always check the real price.
+- Lines can trail the DraftKings app by a short delay. Live suggestions are dropped when the line
+  looks stale (far from what the scoreboard implies, or a prop line not refreshed in 10 minutes).
+
+## The model (`js/model.js`)
+
+- **Team ratings** – offense and defense rated separately from every final score this season,
+  adjusted for opponent and home field, regressed toward average for small samples.
+- **Pregame** – the model's number is pulled 70% of the way toward the market before computing
+  cover probability, so only real disagreements survive the vig.
+- **Live** – projected final margin and total are recomputed from score, clock, possession and
+  field position, anchored to the closing pregame line, and blended with ESPN's win probability.
+- **Props** – recency-weighted projection from the player's game logs; live, it adds what the
+  player already has to a pace-adjusted remainder. Lines far from a player's form are flagged
+  "role changed?" and not bet.
+- **Grades** – A ≥ 6% expected value, B ≥ 3%, C ≥ 1%. Stakes are quarter-Kelly, capped at 2 units.
+
+These are estimates from a simple public-data model, not guarantees. Bet responsibly; 21+.
+Problem gambling help: 1-800-GAMBLER.
