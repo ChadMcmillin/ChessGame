@@ -1,9 +1,9 @@
-import * as api from './espn.js';
-import * as odds from './odds.js';
+import * as api from './espn.js?v=6';
+import * as odds from './odds.js?v=6';
 import {
   buildRatings, evaluateGame, evaluateProps, evaluateTeamTotals, rankPicks, rankLeads, settle, gradeAt,
   fmtOdds, fmtLine, PROP_TYPES, MILESTONE_TYPES, TD_TYPES,
-} from './model.js';
+} from './model.js?v=6';
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -31,8 +31,17 @@ const hoursTo = (g) => (Date.parse(g.date) - Date.now()) / 36e5;
 const wantsDeep = (g) => g.state === 'in' || (g.state === 'pre' && hoursTo(g) < 36) || g.id === S.open;
 
 async function tick() {
+  let sb;
+  try { sb = await api.scoreboard(); } catch (e) {
+    // Only a failed download is a feed problem; keep showing the last good data and try again.
+    console.error(e);
+    S.error = navigator.onLine === false ? 'You are offline' : 'Can’t reach the data feed — retrying';
+    render();
+    clearTimeout(tick.t);
+    if (!document.hidden) tick.t = setTimeout(tick, 8e3);
+    return;
+  }
   try {
-    const sb = await api.scoreboard();
     S.games = sb.games.sort((a, b) => order(a) - order(b) || Date.parse(a.date) - Date.parse(b.date));
     S.week = sb.week; S.error = null; S.updated = Date.now();
     for (const g of S.games) {
@@ -54,8 +63,9 @@ async function tick() {
     const tracked = new Set(S.bets.filter((b) => !b.final).map((b) => b.gameId));
     for (const g of S.games) if (wantsDeep(g) || (tracked.has(g.id) && g.state !== 'pre')) loadDeep(g);
   } catch (e) {
-    S.error = navigator.onLine === false ? 'You are offline' : 'Can’t reach the data feed — retrying';
-    render();
+    console.error(e);
+    S.error = `App error: ${String(e?.message || e).slice(0, 80)}`;
+    try { render(); } catch {}
   }
   clearTimeout(tick.t);
   if (!document.hidden) tick.t = setTimeout(tick, S.games.some((g) => g.state === 'in') ? 10e3 : 30e3);
@@ -127,6 +137,7 @@ function refresh() {
   const all = [];
   let scanned = 0;
   for (const g of S.games) {
+   try {
     const d = S.data[g.id] || {};
     const wp = g.situation?.wpHome ?? (g.state === 'in' && d.sum?.wp?.length ? d.sum.wp[d.sum.wp.length - 1] : null);
     const pre = g.state === 'pre' ? g.odds : S.pre[g.id];
@@ -144,6 +155,11 @@ function refresh() {
     scanned += e.picks.filter((p) => p.side === 'over' || p.side === 'home' || p.side === 'yes').length;
     S.ev[g.id] = e;
     all.push(...e.picks);
+   } catch (err) {
+    // One game with odd data must not take the whole board down.
+    console.error(err); S.bug = `${g.away?.abbr} @ ${g.home?.abbr}: ${String(err?.message || err).slice(0, 70)}`;
+    S.ev[g.id] = { picks: [], proj: null };
+   }
   }
   S.scanned = Math.round(scanned);
   S.picks = rankPicks(all);
@@ -155,7 +171,7 @@ function refresh() {
     if (fresh) toast(`New A-grade bet: ${fresh.label}`, fresh.gameId);
   }
   for (const p of top) S.known.add(p.id + p.line);
-  gradeBets();
+  try { gradeBets(); } catch (err) { console.error(err); }
   render();
 }
 
@@ -252,7 +268,7 @@ function viewPicks() {
   }
   return `<div class="chips">${chips}</div>
     <div class="scanline">${loading ? '<i class="spin"></i>' : '<i class="dot"></i>'} ${S.scanned} markets checked · ${S.games.filter((g) => g.state === 'in').length} live, ${S.games.filter((g) => g.state === 'pre').length} upcoming</div>
-    ${dkChip()}
+    ${dkChip()}${S.bug ? `<p class="fine neg">Skipped a game with unexpected data — ${esc(S.bug)}</p>` : ''}
     ${body}
     <p class="fine">Edges are model estimates, not guarantees. Game-line prices come from the DraftKings feed; prop prices are only ever the ones you enter. 1u = 1% of bankroll. 21+. Problem gambling help: 1-800-GAMBLER.</p>`;
 }
@@ -441,7 +457,8 @@ function put(sel, html) {
   $(sel).innerHTML = html;
 }
 function render() {
-  put('#view', S.tab === 'picks' ? viewPicks() : S.tab === 'games' ? viewGames() : viewBets());
+  const safe = (fn) => { try { return fn(); } catch (err) { console.error(err); return `<div class="empty"><b>This screen hit a problem</b><p>${esc(String(err?.message || err).slice(0, 120))}</p></div>`; } };
+  put('#view', safe(() => (S.tab === 'picks' ? viewPicks() : S.tab === 'games' ? viewGames() : viewBets())));
   document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === S.tab));
   const liveN = S.games.filter((g) => g.state === 'in').length;
   $('#badge-live').textContent = liveN || '';
@@ -449,7 +466,7 @@ function render() {
   const g = S.open && S.games.find((x) => x.id === S.open);
   $('#sheet').classList.toggle('show', !!g);
   document.body.classList.toggle('locked', !!g);
-  if (g) put('#sheet', viewDetail(g));
+  if (g) put('#sheet', safe(() => viewDetail(g)) || '');
   stamp();
 }
 function stamp() {

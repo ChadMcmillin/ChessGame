@@ -108,7 +108,7 @@ function normEvent(e) {
 
 export async function scoreboard() {
   const d = await getJson(`${SITE}/scoreboard`);
-  return { season: d.season?.year, seasonType: d.season?.type, week: d.week?.number, games: (d.events || []).map(normEvent) };
+  return { season: d.season?.year, seasonType: d.season?.type, week: d.week?.number, games: (d.events || []).flatMap((e) => { try { return [normEvent(e)]; } catch (err) { console.error('skipped a game the feed sent in an unexpected shape', err); return []; } }) };
 }
 
 // Every completed regular-season game so far, for team ratings. Past weeks are cached for good.
