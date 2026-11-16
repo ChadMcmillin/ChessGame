@@ -290,7 +290,8 @@ export const propKey = (p) => `${p.id}@${p.line ?? ''}`;
 export function gradeAt(pk, price) {
   const k = pk.side === 'yes' ? K_ONE_WAY : K_TWO_WAY;
   const q = marketProb(price, k);
-  const prob = q + W_PROP * (pk.model - q);
+  // A model that is wildly off the market is more likely wrong than right, so cap the disagreement.
+  const prob = q + W_PROP * (clamp(pk.model, q - 0.15, q + 0.15) - q);
   const ev = evPerUnit(prob, price);
   const gr = pk.suspect ? null : grade(ev);
   return { prob, breakeven: impliedProb(price), ev, grade: gr, units: gr ? units(prob, price) : 0 };
@@ -308,8 +309,14 @@ function mkProp(g, o, prices) {
     lead: !!o.balanced && !o.suspect && !o.stale && bi >= impliedProb(EST_PROP_PRICE),
   };
   pk.key = propKey(pk);
-  const user = prices?.[pk.key];
-  if (user != null) Object.assign(pk, { price: user, priceUser: true, needsPrice: false, lead: false }, gradeAt(pk, user));
+  // A price is either one the user typed (a number) or a live DraftKings one ({p, src: 'dk'}).
+  const hit = prices?.[pk.key];
+  if (hit != null) {
+    const price = typeof hit === 'object' ? hit.p : hit, src = typeof hit === 'object' ? hit.src : 'you';
+    Object.assign(pk, { price, priceSrc: src, priceUser: src === 'you', needsPrice: false, lead: false }, gradeAt(pk, price));
+    // A live DraftKings market that hasn't updated in 10 minutes is probably suspended.
+    if (src === 'dk' && o.stale) { pk.grade = null; pk.units = 0; }
+  }
   return pk;
 }
 
@@ -360,6 +367,7 @@ export function evaluateProps(g, props, players, logs, box, proj, prices) {
         stale: live && !(pr.lastUpdated && Date.now() - Date.parse(pr.lastUpdated) < 10 * 6e4),
         // Miles from the line pregame means the player's role has probably changed.
         suspect: def.dist !== 'p' && !live && pr.line >= 15 && Math.abs(pj.mean - pr.line) > 0.25 * pr.line,
+        volume: !def.dist, // yards, attempts, catches: the stats that reveal a changed role
         reason: live
           ? `Has ${liveCtx.cur}, on pace for ${r.proj.toFixed(1)} · line ${pr.line}`
           : `Projects ${r.proj.toFixed(1)} · last 4 avg ${pj.recent.toFixed(1)}, season ${pj.season.toFixed(1)} · over in ${hits} of ${pj.n}`,
@@ -393,7 +401,7 @@ export function evaluateProps(g, props, players, logs, box, proj, prices) {
     }
   }
   // If one of a player's lines is far from his form, his role has changed — distrust all of them.
-  const shaky = new Set(picks.filter((p) => p.suspect).map((p) => p.athleteId));
+  const shaky = new Set(picks.filter((p) => p.suspect && p.volume).map((p) => p.athleteId));
   for (const p of picks) if (shaky.has(p.athleteId)) Object.assign(p, { suspect: true, lead: false, grade: null, units: 0 });
   return { picks };
 }

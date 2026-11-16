@@ -16,7 +16,8 @@
 <body>
   <header id="top">
     <h1><span class="mark">◆</span> Gridiron Edge</h1>
-    <div id="status" class="status">Connecting…</div>
+    <div class="top-r"><div id="status" class="status">Connecting…</div>
+      <button id="gear" data-act="settings" aria-label="Settings"><svg viewBox="0 0 24 24"><path d="M4 7h9M19 7h1M4 17h1M11 17h9"/><circle cx="16" cy="7" r="2.5"/><circle cx="8" cy="17" r="2.5"/></svg></button></div>
   </header>
   <main id="view"></main>
   <nav id="tabs">
@@ -37,6 +38,24 @@
       <p id="pr-out" class="pr-out"></p>
       <div class="actions"><button class="btn" id="pr-save">Save price</button></div>
       <div class="actions"><button class="btn ghost" id="pr-clear">Remove price</button><button class="btn ghost" id="pr-cancel">Cancel</button></div>
+    </div>
+  </div>
+  <div id="settings" class="modal">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="st-title">
+      <div class="title" id="st-title">Live DraftKings prop prices</div>
+      <p class="sub">The free data feed has DraftKings’ prop lines but not its prices. Add a key from The Odds API, a licensed odds service, and props are priced and graded automatically. <a href="https://the-odds-api.com/#get-access" target="_blank" rel="noopener">Get a key ↗</a></p>
+      <input id="st-key" class="field" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Paste your API key" aria-label="Odds API key">
+      <div class="st-lab">Markets</div>
+      <div class="opts"><button data-cfg="set" data-v="core">Top 10</button><button data-cfg="set" data-v="all">All 23</button></div>
+      <div class="st-lab">How often during live games</div>
+      <div class="opts"><button data-cfg="speed" data-v="saver">Saver · 5 min</button><button data-cfg="speed" data-v="balanced">Balanced · 2 min</button><button data-cfg="speed" data-v="fastest">Fastest · 1 min</button></div>
+      <div class="st-lab">Which games</div>
+      <div class="opts"><button data-cfg="scope" data-v="all">All live and upcoming</button><button data-cfg="scope" data-v="open">Only games I open</button></div>
+      <p id="st-est" class="pr-out"></p>
+      <p id="st-status" class="pr-out"></p>
+      <div class="actions"><button class="btn" id="st-save">Save and connect</button></div>
+      <div class="actions"><button class="btn ghost" id="st-clear">Remove key</button><button class="btn ghost" id="st-close">Close</button></div>
+      <p class="fine">Your key stays on this device and is only sent to the odds service.</p>
     </div>
   </div>
   <script type="module" src="js/app.js"></script>

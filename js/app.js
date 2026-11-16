@@ -1,4 +1,5 @@
 import * as api from './espn.js';
+import * as odds from './odds.js';
 import {
   buildRatings, evaluateGame, evaluateProps, evaluateTeamTotals, rankPicks, rankLeads, settle, gradeAt,
   fmtOdds, fmtLine, PROP_TYPES, MILESTONE_TYPES, TD_TYPES,
@@ -16,7 +17,10 @@ const S = {
   data: {}, // gameId -> { sum, props, players }
   logs: {}, // athleteId -> game log rows
   ev: {}, // gameId -> { picks, proj, tds, ladders }
-  picks: [], leads: [], scanned: 0, prices: ls.get('prices', {}), known: new Set(), armed: false,
+  picks: [], leads: [], scanned: 0, prices: ls.get('prices', {}),
+  // Live DraftKings prop prices (optional, needs the user's Odds API key).
+  cfg: { key: '', set: 'core', speed: 'balanced', scope: 'all', ...ls.get('cfg', {}) },
+  dk: ls.get('dk', {}), dkMeta: ls.get('dkMeta', {}), dkStop: false, opened: new Set(), known: new Set(), armed: false,
   tab: 'picks', filter: 'all', open: null, sub: 'bets',
   bets: ls.get('bets', []), pre: ls.get('pre', {}),
   updated: 0, error: null, loading: new Set(),
@@ -38,7 +42,10 @@ async function tick() {
     ls.set('pre', Object.fromEntries(Object.entries(S.pre).slice(-40)));
     // Entered prices only make sense while their game is still on the board.
     const onBoard = new Set(S.games.filter((g) => g.state !== 'post').map((g) => g.id));
-    if (S.games.length) for (const k of Object.keys(S.prices)) if (!onBoard.has(k.split('|')[0])) delete S.prices[k];
+    if (S.games.length) {
+      for (const k of Object.keys(S.prices)) if (!onBoard.has(k.split('|')[0])) delete S.prices[k];
+      for (const k of Object.keys(S.dk)) if (!onBoard.has(k)) delete S.dk[k];
+    }
     if (Date.now() - S.ratingsAt > 15 * 6e4) {
       S.ratingsAt = Date.now();
       api.seasonResults(sb.season, sb.seasonType, sb.week).then((res) => { S.ratings = buildRatings(res); refresh(); }).catch(() => {});
@@ -69,8 +76,10 @@ async function loadDeep(g) {
     await Promise.allSettled(jobs);
     for (const [id, n] of Object.entries(d.sum?.names || {})) d.players[id] ??= { ...n, pos: '' };
     refresh();
-    if (d.props) {
-      const need = [...new Set(d.props.filter((p) => p.athleteId && (PROP_TYPES[p.typeId] || MILESTONE_TYPES[p.typeId] || TD_TYPES[p.typeId])).map((p) => p.athleteId))]
+    if (g.state !== 'post') await pullDk(g, d);
+    const lines = [...(d.props || []), ...(S.dk[g.id]?.rows || [])];
+    if (lines.length) {
+      const need = [...new Set(lines.filter((p) => p.athleteId && (PROP_TYPES[p.typeId] || MILESTONE_TYPES[p.typeId] || TD_TYPES[p.typeId])).map((p) => p.athleteId))]
         .filter((id) => !S.logs[id]);
       let done = 0;
       await api.pool(need, 6, async (id) => {
@@ -86,6 +95,34 @@ async function loadDeep(g) {
   }
 }
 
+// ---------- live DraftKings prop prices ----------
+const dkInterval = (g) => odds.SPEEDS[S.cfg.speed][g.state === 'in' ? 0 : hoursTo(g) < 6 ? 1 : 2];
+const wantsDk = (g) => !!S.cfg.key && !S.dkStop && g.state !== 'post' && (S.cfg.scope === 'all' || S.opened.has(g.id));
+// Prices are only used while fresh; an old price is worse than no price.
+function dkFresh(g) {
+  const x = S.dk[g.id];
+  return S.cfg.key && x?.rows && Date.now() - x.at < Math.max(3 * dkInterval(g), 10) * 6e4 ? x : null;
+}
+async function pullDk(g, d, force) {
+  if (!wantsDk(g) && !(force && S.cfg.key)) return;
+  const prev = S.dk[g.id], mins = dkInterval(g);
+  if (!force && prev && Date.now() - prev.at < mins * 6e4) return;
+  try {
+    const ev = odds.matchEvent((await odds.events(S.cfg.key)).data, g);
+    if (!ev) { S.dk[g.id] = { at: Date.now(), rows: null, note: 'not listed yet' }; return; }
+    const r = await odds.eventOdds(S.cfg.key, ev.id, S.cfg.set);
+    S.dk[g.id] = { at: Date.now(), ...odds.parseOdds(r.data, d.players, g) };
+    S.dkMeta = { remaining: r.remaining, last: r.last, at: Date.now(), error: null };
+    S.dkStop = r.remaining != null && r.remaining < odds.SETS[S.cfg.set].length; // not enough left for another pull
+    if (S.dkStop) S.dkMeta.error = 'Out of credits for this period';
+  } catch (e) {
+    S.dkMeta = { ...S.dkMeta, error: e.message, at: Date.now() };
+    if (e.status === 401 || e.status === 403) S.dkStop = true; // bad key or no credits: wait for the user
+    else S.dk[g.id] = { ...(prev || {}), at: Date.now() - Math.max(mins - 1, 0) * 6e4 }; // try again in a minute
+  }
+  ls.set('dk', S.dk); ls.set('dkMeta', S.dkMeta);
+}
+
 function refresh() {
   const all = [];
   let scanned = 0;
@@ -95,9 +132,14 @@ function refresh() {
     const pre = g.state === 'pre' ? g.odds : S.pre[g.id];
     const { picks, proj } = evaluateGame(g, S.ratings, pre, wp);
     const e = { picks: [...picks], proj, wp };
-    if (d.props) {
-      e.picks.push(...evaluateProps(g, d.props, d.players, S.logs, d.sum?.box, proj, S.prices).picks,
-        ...evaluateTeamTotals(g, d.props.filter((p) => p.typeId === '98' && p.line != null), proj, S.prices));
+    const dk = dkFresh(g);
+    if (d.props || dk) {
+      // Where DraftKings' live feed covers a market, its lines and prices replace the ESPN lines.
+      const lines = dk ? (d.props || []).filter((p) => !dk.types.includes(p.typeId)).concat(dk.rows) : d.props;
+      const prices = dk ? { ...S.prices, ...dk.prices } : S.prices;
+      e.dk = dk ? dk.at : 0;
+      e.picks.push(...evaluateProps(g, lines, d.players, S.logs, d.sum?.box, proj, prices).picks,
+        ...evaluateTeamTotals(g, lines.filter((p) => p.typeId === '98' && p.line != null), proj, prices));
     }
     scanned += e.picks.filter((p) => p.side === 'over' || p.side === 'home' || p.side === 'yes').length;
     S.ev[g.id] = e;
@@ -181,7 +223,15 @@ function pickCard(p, compact) {
   </article>`;
 }
 
-const LEADS_NOTE = '<h2>Props to price-check</h2><p class="fine">The data feed has DraftKings’ prop lines but not its prop prices, so these have no odds yet. They are the model’s strongest leans. Enter the price DraftKings is showing to see the real edge.</p>';
+const ago = (t) => { const m = Math.round((Date.now() - t) / 6e4); return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : `${Math.round(m / 60)} hr ago`; };
+function dkChip() {
+  const m = S.dkMeta;
+  const txt = !S.cfg.key ? '<b>Prop prices are manual.</b> Turn on live DraftKings prices ›'
+    : m.error ? `<b class="neg">Live prop prices paused:</b> ${esc(m.error)} ›`
+      : `<i class="dot"></i> <b>DraftKings prop prices live</b>${m.remaining != null ? ` · ${Math.round(m.remaining).toLocaleString()} credits left` : ''} ›`;
+  return `<button class="dkchip" data-act="settings">${txt}</button>`;
+}
+const LEADS_NOTE = '<h2>Props to price-check</h2><p class="fine">These props have a DraftKings line but no price yet, so no odds are shown. They are the model’s strongest leans. Enter the price DraftKings is showing to see the real edge.</p>';
 
 function viewPicks() {
   const f = S.filter;
@@ -202,6 +252,7 @@ function viewPicks() {
   }
   return `<div class="chips">${chips}</div>
     <div class="scanline">${loading ? '<i class="spin"></i>' : '<i class="dot"></i>'} ${S.scanned} markets checked · ${S.games.filter((g) => g.state === 'in').length} live, ${S.games.filter((g) => g.state === 'pre').length} upcoming</div>
+    ${dkChip()}
     ${body}
     <p class="fine">Edges are model estimates, not guarantees. Game-line prices come from the DraftKings feed; prop prices are only ever the ones you enter. 1u = 1% of bankroll. 21+. Problem gambling help: 1-800-GAMBLER.</p>`;
 }
@@ -321,7 +372,8 @@ function propRow(p, left) {
   const chip = p.suspect ? '<span class="lean">Role changed?</span>'
     : p.price != null ? `<span class="lean ${p.grade ? 'g' + p.grade : ''}">${fmtOdds(p.price)} · ${p.ev > 0 ? '+' : ''}${(p.ev * 100).toFixed(1)}%</span>`
       : `<span class="lean dash">${fmtOdds(p.beat)} or better</span>`;
-  return `<div class="prow ${p.suspect ? '' : 'tap'}" ${p.suspect ? '' : `data-act="price" data-key="${esc(p.key)}"`}><span class="grow">${left}</span>${chip}</div>`;
+  const tap = !p.suspect && p.priceSrc !== 'dk'; // live DraftKings prices need no typing
+  return `<div class="prow ${tap ? 'tap' : ''}" ${tap ? `data-act="price" data-key="${esc(p.key)}"` : ''}><span class="grow">${left}</span>${chip}</div>`;
 }
 const groupBy = (list, fn) => {
   const m = new Map();
@@ -333,7 +385,7 @@ function viewProps(g, e, d) {
   if (g.state === 'post') return '<div class="empty"><p>Props are closed for this game.</p></div>';
   if (!d.props) return `<div class="empty"><i class="spin"></i><p>Loading DraftKings props…</p></div>`;
   // Per market show one side: the one the user priced, otherwise the one the model leans to.
-  const rank = (p) => (p.price != null ? 2 : 0) + p.model;
+  const rank = (p) => (p.price != null ? 10 + p.ev : p.model);
   const sides = [...groupBy(e.picks.filter((p) => p.market === 'prop' || p.market === 'teamtotal'), (p) => [p.market, p.athleteId, p.typeId, p.line].join('|')).values()]
     .map((pair) => pair.reduce((a, b) => (rank(b) > rank(a) ? b : a)));
   const ouRow = (p) => propRow(p, `${esc(p.stat)} <b>${p.line}</b>${p.current != null ? ` <small>has ${p.current}</small>` : ''}
@@ -345,7 +397,11 @@ function viewProps(g, e, d) {
   const tds = e.picks.filter((p) => p.market === 'td' && p.typeId === '31').sort((a, b) => b.model - a.model).slice(0, 16);
   const yes = (p, name) => propRow(p, `${name}<small class="blk">${pct(p.model)} chance · fair ${fmtOdds(p.fair)}</small>`);
   const lad = [...groupBy(e.picks.filter((p) => p.market === 'ms'), (p) => `${p.player} · ${p.stat}`).entries()].slice(0, 40);
-  return `<p class="fine">These are DraftKings’ lines, but the feed doesn’t carry its prop prices. Each row shows the worst price still worth betting. <b>Tap a row to enter the price DraftKings is showing</b> and get the real edge.</p>
+  const note = e.dk
+    ? `<div class="dkbar"><span><i class="dot"></i> <b>Live DraftKings lines and prices</b> · updated ${ago(e.dk)}</span><button class="btn ghost" data-act="dkpull" data-id="${g.id}">Refresh</button></div>
+       <p class="fine">Each row shows DraftKings’ price and the edge at that price. Rows without a price can be tapped to enter one.</p>`
+    : `<p class="fine">These are DraftKings’ lines, but the free feed doesn’t carry its prop prices. Each row shows the worst price still worth betting. <b>Tap a row to enter the price DraftKings is showing</b>, or <button class="link" data-act="settings">turn on live prices</button>.</p>`;
+  return `${note}
     ${!d.ready ? '<div class="scanline"><i class="spin"></i> Reading player game logs…</div>' : ''}
     ${ou ? `<h2>Over / under</h2>${ou}` : d.ready ? '<div class="empty"><p>No over/under props posted yet.</p></div>' : ''}
     ${tt.length ? `<h2>Team totals</h2><div class="card">${tt.map((p) => propRow(p, `${esc(p.label.replace(/ (Over|Under) .*/, ''))} <b>${p.line}</b><small class="blk">${p.side === 'over' ? 'Over' : 'Under'} ${pct(p.model)} · projects ${p.projection.toFixed(1)}</small>`)).join('')}</div>` : ''}
@@ -416,6 +472,13 @@ document.addEventListener('click', (ev) => {
   if (el.dataset.tab) { S.tab = el.dataset.tab; window.scrollTo(0, 0); return render(); }
   const act = el.dataset.act;
   if (act === 'ext') return ev.stopPropagation();
+  if (act === 'settings') { ev.stopPropagation(); return openSettings(); }
+  if (act === 'dkpull') {
+    const g = S.games.find((x) => x.id === el.dataset.id);
+    if (!g) return;
+    el.textContent = 'Refreshing…'; el.disabled = true;
+    return pullDk(g, S.data[g.id] || { players: {} }, true).then(() => { lastHtml = {}; refresh(); });
+  }
   if (act === 'price') { ev.stopPropagation(); return openPricer(el.dataset.key); }
   if (act === 'track') {
     ev.stopPropagation();
@@ -435,7 +498,7 @@ document.addEventListener('click', (ev) => {
   if (act === 'open' || act === 'toast') {
     const id = el.dataset.id;
     if (!id) return;
-    S.open = id; S.sub = 'bets'; history.pushState({ sheet: 1 }, '');
+    S.open = id; S.opened.add(id); S.sub = 'bets'; history.pushState({ sheet: 1 }, '');
     render(); $('#sheet').scrollTop = 0;
     const g = S.games.find((x) => x.id === id);
     if (g) loadDeep(g);
@@ -481,6 +544,56 @@ $('#pr-save').addEventListener('click', () => { const price = pricerPreview(); i
 $('#pr-clear').addEventListener('click', () => closePricer(null));
 $('#pr-cancel').addEventListener('click', () => closePricer());
 $('#pricer').addEventListener('click', (e) => { if (e.target.id === 'pricer') closePricer(); });
+
+// ---------- settings: live DraftKings prices ----------
+let draft = null;
+function settingsPaint() {
+  document.querySelectorAll('#settings [data-cfg]').forEach((b) => b.classList.toggle('on', draft[b.dataset.cfg] === b.dataset.v));
+  const e = odds.estimate(draft.set, draft.speed);
+  $('#st-est').innerHTML = `Each price check uses up to <b>${e.perPull} credits</b> per game: about <b>${e.perGame.toLocaleString()}</b> for one live game${draft.scope === 'all' ? `, and roughly <b>${e.sunday.toLocaleString()}</b> for a full Sunday with the app left open` : ''}. Checks only run while the app is on screen.`;
+  $('#st-clear').hidden = !S.cfg.key;
+}
+function settingsStatus() {
+  const m = S.dkMeta, el = $('#st-status');
+  el.innerHTML = !S.cfg.key ? '' : m.error ? `<b class="neg">${esc(m.error)}</b>` : `<b class="pos">Connected.</b>${m.remaining != null ? ` ${Math.round(m.remaining).toLocaleString()} credits left this period.` : ''}`;
+}
+function openSettings() {
+  draft = { ...S.cfg };
+  $('#st-key').value = S.cfg.key;
+  settingsPaint(); settingsStatus();
+  $('#settings').classList.add('show');
+}
+async function saveSettings() {
+  const key = $('#st-key').value.trim();
+  S.cfg = { ...draft, key };
+  ls.set('cfg', S.cfg);
+  S.dkStop = false; S.dkMeta = {}; ls.set('dkMeta', S.dkMeta);
+  settingsPaint();
+  if (!key) { S.dk = {}; ls.set('dk', S.dk); settingsStatus(); lastHtml = {}; return refresh(); }
+  const el = $('#st-status');
+  el.textContent = 'Checking the key…';
+  try {
+    const r = await odds.events(key, true); // listing games is free, so it makes a safe key check
+    S.dkMeta = { remaining: r.remaining, at: Date.now(), error: null };
+    el.innerHTML = `<b class="pos">Key works.</b>${r.remaining != null ? ` ${Math.round(r.remaining).toLocaleString()} credits left this period.` : ''} Pulling DraftKings prices now…`;
+    S.dk = {}; // settings changed: pull fresh
+    await Promise.allSettled(S.games.filter(wantsDk).filter(wantsDeep).map((g) => pullDk(g, S.data[g.id] || { players: {} }, true)));
+    settingsStatus();
+  } catch (e) {
+    S.dkMeta = { error: e.message, at: Date.now() };
+    if (e.status === 401 || e.status === 403) S.dkStop = true;
+    settingsStatus();
+  }
+  ls.set('dkMeta', S.dkMeta);
+  lastHtml = {}; refresh(); tick();
+}
+$('#settings').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-cfg]');
+  if (b) { draft[b.dataset.cfg] = b.dataset.v; return settingsPaint(); }
+  if (e.target.id === 'settings' || e.target.id === 'st-close') $('#settings').classList.remove('show');
+});
+$('#st-save').addEventListener('click', saveSettings);
+$('#st-clear').addEventListener('click', () => { $('#st-key').value = ''; saveSettings(); });
 
 window.addEventListener('popstate', () => { S.open = null; render(); });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });

@@ -39,13 +39,30 @@ DraftKings as its odds provider:
 
 Known limits of the feed:
 
-- **Prop prices are not included**, only the lines. The app never invents one. A prop shows the
-  model's chance, its fair price and a "bet at X or better" threshold; tap it and enter the price
-  DraftKings is showing to get a real edge, grade and stake. Yardage-style props whose usual
-  near-even price would clear the bar are listed under "Props to price-check". Spread, total and
-  moneyline prices do come from the feed and are graded automatically.
+- **Prop prices are not in the free feed**, only the lines, and the app never invents one. Without
+  live prices turned on (below), a prop shows the model's chance, its fair price and a "bet at X
+  or better" threshold; tap it and enter the price DraftKings is showing to get a real edge.
+  Spread, total and moneyline prices do come from the feed and are graded automatically.
 - Lines can trail the DraftKings app by a short delay. Live suggestions are dropped when the line
   looks stale (far from what the scoreboard implies, or a prop line not refreshed in 10 minutes).
+
+## Live DraftKings prop prices (optional)
+
+DraftKings does not offer a public price feed and blocks automated access to its own site, so
+real prop prices come from [The Odds API](https://the-odds-api.com), a licensed odds service that
+carries DraftKings' player-prop lines and prices, updated about once a minute before and during
+games.
+
+1. Get an API key from the-odds-api.com.
+2. In the app, tap the settings icon (top right), paste the key, and tap **Save and connect**.
+
+From then on DraftKings' lines and prices replace the free feed's lines for every covered market
+(passing, rushing, receiving, anytime touchdown and more), and props are graded automatically.
+
+The service bills in credits: one credit per market per game per check. Settings lets you choose
+which markets, how often, and which games, shows an estimate, and shows credits remaining. Checks
+only run while the app is on screen, and stop when credits run out. The key is stored only on the
+device (`js/odds.js` sends it to the odds service and nowhere else).
 
 ## The model (`js/model.js`)
 
