@@ -371,7 +371,7 @@ function viewDetail(g) {
 function propRow(p, left) {
   const chip = p.suspect ? '<span class="lean">Role changed?</span>'
     : p.price != null ? `<span class="lean ${p.grade ? 'g' + p.grade : ''}">${fmtOdds(p.price)} · ${p.ev > 0 ? '+' : ''}${(p.ev * 100).toFixed(1)}%</span>`
-      : `<span class="lean dash">${fmtOdds(p.beat)} or better</span>`;
+      : `<span class="lean dash">${p.beat == null ? 'no value' : fmtOdds(p.beat) + ' or better'}</span>`;
   const tap = !p.suspect && p.priceSrc !== 'dk'; // live DraftKings prices need no typing
   return `<div class="prow ${tap ? 'tap' : ''}" ${tap ? `data-act="price" data-key="${esc(p.key)}"` : ''}><span class="grow">${left}</span>${chip}</div>`;
 }
@@ -523,7 +523,7 @@ function openPricer(key) {
   if (!p) return;
   P.key = key; P.sign = p.price > 0 ? 1 : -1;
   $('#pr-label').textContent = p.label;
-  $('#pr-sub').textContent = `Model ${pct(p.model)} · fair price ${fmtOdds(p.fair)} · worth betting at ${fmtOdds(p.beat)} or better. Type the price DraftKings shows for this exact bet.`;
+  $('#pr-sub').textContent = `Model ${pct(p.model)} · fair price ${fmtOdds(p.fair)} · ${p.beat == null ? 'not worth betting at any realistic price' : `worth betting at ${fmtOdds(p.beat)} or better`}. Type the price DraftKings shows for this exact bet.`;
   $('#pr-val').value = p.price != null ? Math.abs(p.price) : '';
   $('#pr-clear').hidden = p.price == null;
   $('#pricer').classList.add('show');

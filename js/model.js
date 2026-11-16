@@ -284,6 +284,23 @@ const marketProb = (price, k) => Math.min(0.98, impliedProb(price) * k);
 // Highest implied probability (the worst price) at which the bet still clears MIN_EV once the
 // model's probability has been pulled toward the market's.
 const beatImplied = (m, k) => (W_PROP * m) / (1 + MIN_EV - k * (1 - W_PROP));
+// Yes-only markets (touchdown scorers, milestones) carry heavy vig and are mostly plus-money, where
+// a few points of probability turn into a huge paper edge. So they get a bigger vig allowance, less
+// trust in the model, and disagreement measured in relative (log-odds) terms rather than points.
+const K_YES = 0.86, W_YES = 0.25, YES_CAP = 0.8;
+const logit = (p) => Math.log(p / (1 - p)), expit = (x) => 1 / (1 + Math.exp(-x));
+function yesProb(model, price) {
+  const lq = logit(clamp(impliedProb(price) * K_YES, 0.005, 0.98));
+  return expit(lq + W_YES * clamp(logit(clamp(model, 0.005, 0.98)) - lq, -YES_CAP, YES_CAP));
+}
+// Worst implied probability at which a yes-market still clears MIN_EV (null if none does).
+function beatYes(model) {
+  const ev = (i) => yesProb(model, probToAmerican(i)) / i - 1;
+  let lo = 0.02, hi = 0.97;
+  if (ev(lo) < MIN_EV) return null;
+  for (let n = 0; n < 30; n++) { const mid = (lo + hi) / 2; if (ev(mid) >= MIN_EV) lo = mid; else hi = mid; }
+  return lo;
+}
 export const propKey = (p) => `${p.id}@${p.line ?? ''}`;
 
 // What a prop is worth at a given real price: the model's probability pulled toward the market's.
@@ -291,19 +308,22 @@ export function gradeAt(pk, price) {
   const k = pk.side === 'yes' ? K_ONE_WAY : K_TWO_WAY;
   const q = marketProb(price, k);
   // A model that is wildly off the market is more likely wrong than right, so cap the disagreement.
-  const prob = q + W_PROP * (clamp(pk.model, q - 0.15, q + 0.15) - q);
+  const prob = pk.side === 'yes' ? yesProb(pk.model, price) : q + W_PROP * (clamp(pk.model, q - 0.15, q + 0.15) - q);
   const ev = evPerUnit(prob, price);
-  const gr = pk.suspect ? null : grade(ev);
+  // When a yes-market model is far beyond the cap from DraftKings' number, trust DraftKings: no grade.
+  const wild = pk.side === 'yes' && Math.abs(logit(clamp(pk.model, 0.005, 0.98)) - logit(clamp(impliedProb(price) * K_YES, 0.005, 0.98))) > YES_CAP + 0.3;
+  const gr = pk.suspect || wild ? null : grade(ev);
   return { prob, breakeven: impliedProb(price), ev, grade: gr, units: gr ? units(prob, price) : 0 };
 }
 
 function mkProp(g, o, prices) {
   const k = o.side === 'yes' ? K_ONE_WAY : K_TWO_WAY;
-  const bi = clamp(beatImplied(o.prob, k), 0.02, 0.98);
+  const by = o.side === 'yes' ? beatYes(o.prob) : null;
+  const bi = o.side === 'yes' ? by ?? 0 : clamp(beatImplied(o.prob, k), 0.02, 0.98);
   const pk = {
     gameId: g.id, live: g.state === 'in', matchup: `${g.away.abbr} @ ${g.home.abbr}`, ...o,
     id: [g.id, o.market, o.side, o.athleteId || '', o.typeId || ''].join('|'),
-    model: o.prob, fair: probToAmerican(o.prob), beat: probToAmerican(bi),
+    model: o.prob, fair: probToAmerican(o.prob), beat: bi > 0 ? probToAmerican(bi) : null,
     price: null, needsPrice: true, breakeven: null, ev: null, grade: null, units: 0,
     // Worth flagging unpriced only where a near-even price is the norm and would clear the bar.
     lead: !!o.balanced && !o.suspect && !o.stale && bi >= impliedProb(EST_PROP_PRICE),
@@ -440,7 +460,11 @@ const bestPerMarket = (picks, keep, score) => {
   return [...best.values()].sort((a, b) => score(b) - score(a));
 };
 // Bets with a real price that clear the bar, best first.
-export const rankPicks = (picks) => bestPerMarket(picks, (p) => p.grade, (p) => p.ev);
+// Touchdown and milestone bets are capped at two so they can't crowd out everything else.
+export function rankPicks(picks) {
+  let yes = 0;
+  return bestPerMarket(picks, (p) => p.grade, (p) => p.ev).filter((p) => p.side !== 'yes' || ++yes <= 2);
+}
 // Unpriced props the model leans on hardest — candidates for a price check.
 export const rankLeads = (picks) => bestPerMarket(picks, (p) => p.lead, (p) => p.model);
 

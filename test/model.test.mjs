@@ -127,3 +127,15 @@ test('settle grades bets', () => {
   assert.equal(m.settle({ market: 'ms', side: 'yes', typeId: '195', line: 60, athleteId: 'p' }, fin, { p: { receivingYards: 60 } }).status, 'won');
   assert.equal(m.settle({ market: 'total', side: 'over', line: 43.5 }, game({ state: 'in', home: { id: 'H', abbr: 'H', score: 30 }, away: { id: 'A', abbr: 'A', score: 14 } })).status, 'won');
 });
+
+test('touchdown scorers: plus-money prices do not turn into giant edges', () => {
+  const g = game();
+  const logs = { p: [1, 0, 1, 1, 0, 1, 0, 1].map((v) => ({ rushingTouchdowns: v, receivingTouchdowns: 0 })) };
+  const players = { p: { name: 'Goal Line', pos: 'RB', teamId: 'H' } };
+  const props = [{ athleteId: 'p', typeId: '31', line: null }];
+  const at = (price) => m.evaluateProps(g, props, players, logs, null, null, { [`1|td|yes|p|31@`]: price }).picks[0];
+  for (const price of [-150, 120, 250, 400, 900]) assert.ok(at(price).ev < 0.05 && at(price).grade !== 'A', `${price}: ${at(price).ev}`);
+  assert.ok(at(-150).ev < 0.03, 'a fair-ish favourite price is not a bet');
+  const many = Array.from({ length: 6 }, (_, i) => ({ ...at(400), gameId: 'g' + i, grade: 'B', ev: 0.05 }));
+  assert.equal(m.rankPicks(many).length, 2);
+});
