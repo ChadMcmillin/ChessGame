@@ -39,9 +39,11 @@ DraftKings as its odds provider:
 
 Known limits of the feed:
 
-- **Prop prices are not included**, only the lines. Over/under props are graded against an assumed
-  −114 and labelled "est. price"; touchdown scorers, yardage milestones and count props (sacks,
-  TD passes, field goals) show a *fair price* instead of a grade. Always check the real price.
+- **Prop prices are not included**, only the lines. The app never invents one. A prop shows the
+  model's chance, its fair price and a "bet at X or better" threshold; tap it and enter the price
+  DraftKings is showing to get a real edge, grade and stake. Yardage-style props whose usual
+  near-even price would clear the bar are listed under "Props to price-check". Spread, total and
+  moneyline prices do come from the feed and are graded automatically.
 - Lines can trail the DraftKings app by a short delay. Live suggestions are dropped when the line
   looks stale (far from what the scoreboard implies, or a prop line not refreshed in 10 minutes).
 
@@ -53,9 +55,11 @@ Known limits of the feed:
   cover probability, so only real disagreements survive the vig.
 - **Live** – projected final margin and total are recomputed from score, clock, possession and
   field position, anchored to the closing pregame line, and blended with ESPN's win probability.
-- **Props** – recency-weighted projection from the player's game logs; live, it adds what the
-  player already has to a pace-adjusted remainder. Lines far from a player's form are flagged
-  "role changed?" and not bet.
+- **Props** – recency-weighted projection from the player's game logs (low whole-number lines such
+  as 0.5 receptions are counted out exactly rather than approximated); live, it adds what the
+  player already has to a pace-adjusted remainder. Once a real price is entered, the model's
+  probability is pulled halfway toward the market's own before the edge is computed. Players
+  whose line is far from their season form are flagged "role changed?" and not bet.
 - **Grades** – A ≥ 6% expected value, B ≥ 3%, C ≥ 1%. Stakes are quarter-Kelly, capped at 2 units.
 
 These are estimates from a simple public-data model, not guarantees. Bet responsibly; 21+.

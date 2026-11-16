@@ -4,7 +4,7 @@ export const SD_MARGIN = 13.2; // std dev of NFL final margin around the spread
 export const SD_TOTAL = 13.4; // std dev of final total around the O/U
 export const SD_TEAM = 9.6; // std dev of one team's points
 export const HFA = 1.6; // home field, points
-export const EST_PROP_PRICE = -114; // typical DraftKings O/U prop juice when the feed has no price
+export const EST_PROP_PRICE = -114; // typical DraftKings price on a yardage-style over/under
 const W_PRE = 0.3; // how far we move off the market toward our own number, pregame
 const W_LIVE = 0.4; // live
 const W_PROP = 0.5;
@@ -97,12 +97,11 @@ function possessionValue(g) {
 }
 
 function mkPick(g, o) {
-  const breakeven = impliedProb(o.price);
+  const id = [g.id, o.market, o.side, o.athleteId || '', o.typeId || ''].join('|');
   const ev = evPerUnit(o.prob, o.price);
   return {
-    gameId: g.id, live: g.state === 'in', matchup: `${g.away.abbr} @ ${g.home.abbr}`,
-    priceEst: false, ...o, breakeven, ev, grade: grade(ev), units: units(o.prob, o.price),
-    id: [g.id, o.market, o.side, o.athleteId || '', o.typeId || ''].join('|'),
+    gameId: g.id, live: g.state === 'in', matchup: `${g.away.abbr} @ ${g.home.abbr}`, ...o, id, key: id,
+    breakeven: impliedProb(o.price), ev, grade: grade(ev), units: units(o.prob, o.price),
   };
 }
 
@@ -199,25 +198,25 @@ export function evaluateGame(g, ratings, pre, espnWp) {
 // typeId -> how to read the stat. dist: 'n' normal, 'p' poisson, 'max' longest-play (pregame only)
 export const PROP_TYPES = {
   8: { stats: ['passingYards'], short: 'Pass Yds', cv: 0.28 },
-  9: { stats: ['completions'], short: 'Completions', cv: 0.22 },
+  9: { stats: ['completions'], short: 'Completions', cv: 0.22, count: true },
   10: { stats: ['passingTouchdowns'], short: 'Pass TDs', dist: 'p' },
   15: { stats: ['interceptions'], short: 'INTs', dist: 'p', cat: 'passing' },
-  16: { stats: ['passingAttempts'], short: 'Pass Att', cv: 0.2 },
+  16: { stats: ['passingAttempts'], short: 'Pass Att', cv: 0.2, count: true },
   17: { stats: ['longPassing'], short: 'Longest Completion', cv: 0.4, dist: 'max' },
   18: { stats: ['passingYards', 'rushingYards'], short: 'Pass+Rush Yds', cv: 0.27 },
-  11: { stats: ['rushingAttempts'], short: 'Carries', cv: 0.35 },
+  11: { stats: ['rushingAttempts'], short: 'Carries', cv: 0.35, count: true },
   12: { stats: ['rushingYards'], short: 'Rush Yds', cv: 0.55 },
   13: { stats: ['receivingYards'], short: 'Rec Yds', cv: 0.62 },
-  14: { stats: ['receptions'], short: 'Receptions', cv: 0.48 },
+  14: { stats: ['receptions'], short: 'Receptions', cv: 0.48, count: true },
   19: { stats: ['longReception'], short: 'Longest Reception', cv: 0.55, dist: 'max' },
   20: { stats: ['rushingYards', 'receivingYards'], short: 'Rush+Rec Yds', cv: 0.5 },
   21: { stats: ['longRushing'], short: 'Longest Rush', cv: 0.6, dist: 'max' },
   22: { stats: ['totalKickingPoints'], short: 'Kicking Pts', cv: 0.5 },
   23: { stats: ['extraPointsMade'], short: 'XPs Made', dist: 'p' },
   24: { stats: ['fieldGoalsMade'], short: 'FGs Made', dist: 'p' },
-  25: { stats: ['assistTackles'], short: 'Assists', cv: 0.6 },
-  26: { stats: ['soloTackles'], short: 'Solo Tackles', cv: 0.5 },
-  27: { stats: ['totalTackles'], short: 'Tackles+Ast', cv: 0.42 },
+  25: { stats: ['assistTackles'], short: 'Assists', cv: 0.6, count: true },
+  26: { stats: ['soloTackles'], short: 'Solo Tackles', cv: 0.5, count: true },
+  27: { stats: ['totalTackles'], short: 'Tackles+Ast', cv: 0.42, count: true },
   28: { stats: ['sacks'], short: 'Sacks', dist: 'p' },
 };
 export const MILESTONE_TYPES = {
@@ -225,6 +224,8 @@ export const MILESTONE_TYPES = {
   195: { stats: ['receivingYards'], short: 'Rec Yds', cv: 0.62 },
   196: { stats: ['rushingYards'], short: 'Rush Yds', cv: 0.55 },
   197: { stats: ['rushingYards', 'receivingYards'], short: 'Rush+Rec Yds', cv: 0.5 },
+  201: { stats: ['rushingAttempts'], short: 'Carries', cv: 0.35, count: true },
+  202: { stats: ['receptions'], short: 'Receptions', cv: 0.48, count: true },
 };
 export const TD_TYPES = { 31: 'Anytime TD', 32: '2+ TDs' };
 
@@ -255,10 +256,9 @@ export function seriesFor(log, stats) {
 
 // P(final > line) given a pregame projection and, when live, what the player already has.
 function probOver(def, pj, line, liveCtx) {
-  const dist = def.dist || 'n';
   let mu = pj.mean, sd = pj.sd, cur = 0;
   if (liveCtx) {
-    if (dist === 'max') return null;
+    if (def.dist === 'max') return null;
     const { f, cur: c } = liveCtx;
     cur = c;
     const elapsed = 1 - f;
@@ -267,23 +267,63 @@ function probOver(def, pj, line, liveCtx) {
     mu = rate * f;
     sd = pj.sd * Math.sqrt(Math.max(f, 0.004));
   }
-  // Shrink our number halfway toward what the line implies; the market is sharp.
   const target = line - cur;
-  const muAdj = Math.max(0.01, target + W_PROP * (mu - target));
-  const p = dist === 'p' ? 1 - poissonCdf(Math.floor(target), muAdj) : 1 - normCdf((target - muAdj) / sd);
-  return { p: Math.min(0.97, Math.max(0.03, p)), proj: cur + mu };
+  // Small whole-number markets (0.5 receptions, 1.5 sacks) are lumpy, so count them out exactly.
+  const discrete = def.dist === 'p' || (def.count && target < 7);
+  const p = discrete ? 1 - poissonCdf(Math.floor(target), Math.max(mu, 0.01)) : 1 - normCdf((target - mu) / sd);
+  return { p: clamp(p, 0.03, 0.97), proj: cur + mu };
+}
+
+// ---------- props: pricing ----------
+// The feed carries DraftKings' prop LINES but not their PRICES. A prop is therefore never graded
+// on an invented price. It gets a "bet at X or better" threshold, and a real grade only once the
+// actual DraftKings price is known (entered by the user).
+const K_TWO_WAY = 0.95, K_ONE_WAY = 0.9; // rough share of a price that is probability rather than vig
+const MIN_EV = 0.03;
+const marketProb = (price, k) => Math.min(0.98, impliedProb(price) * k);
+// Highest implied probability (the worst price) at which the bet still clears MIN_EV once the
+// model's probability has been pulled toward the market's.
+const beatImplied = (m, k) => (W_PROP * m) / (1 + MIN_EV - k * (1 - W_PROP));
+export const propKey = (p) => `${p.id}@${p.line ?? ''}`;
+
+// What a prop is worth at a given real price: the model's probability pulled toward the market's.
+export function gradeAt(pk, price) {
+  const k = pk.side === 'yes' ? K_ONE_WAY : K_TWO_WAY;
+  const q = marketProb(price, k);
+  const prob = q + W_PROP * (pk.model - q);
+  const ev = evPerUnit(prob, price);
+  const gr = pk.suspect ? null : grade(ev);
+  return { prob, breakeven: impliedProb(price), ev, grade: gr, units: gr ? units(prob, price) : 0 };
+}
+
+function mkProp(g, o, prices) {
+  const k = o.side === 'yes' ? K_ONE_WAY : K_TWO_WAY;
+  const bi = clamp(beatImplied(o.prob, k), 0.02, 0.98);
+  const pk = {
+    gameId: g.id, live: g.state === 'in', matchup: `${g.away.abbr} @ ${g.home.abbr}`, ...o,
+    id: [g.id, o.market, o.side, o.athleteId || '', o.typeId || ''].join('|'),
+    model: o.prob, fair: probToAmerican(o.prob), beat: probToAmerican(bi),
+    price: null, needsPrice: true, breakeven: null, ev: null, grade: null, units: 0,
+    // Worth flagging unpriced only where a near-even price is the norm and would clear the bar.
+    lead: !!o.balanced && !o.suspect && !o.stale && bi >= impliedProb(EST_PROP_PRICE),
+  };
+  pk.key = propKey(pk);
+  const user = prices?.[pk.key];
+  if (user != null) Object.assign(pk, { price: user, priceUser: true, needsPrice: false, lead: false }, gradeAt(pk, user));
+  return pk;
 }
 
 /**
- * props:   [{athleteId, typeId, line, openLine}] deduped DraftKings lines
+ * props:   [{athleteId, typeId, line, openLine, lastUpdated}] deduped DraftKings lines
  * players: {athleteId: {name, pos, teamId}}
  * logs:    {athleteId: [{statName: number}]} most recent game first
  * box:     {athleteId: {statName: number}} live box score
- * Returns { picks, tds, ladders } — picks are O/U bets, tds/ladders are fair-price tables.
+ * prices:  {propKey: american} real DraftKings prices the user has entered
+ * Returns picks with market 'prop' (over/under), 'td' (touchdown scorer) or 'ms' (milestone).
  */
-export function evaluateProps(g, props, players, logs, box, proj) {
-  const out = { picks: [], tds: [], ladders: [] };
-  if (g.state === 'post') return out;
+export function evaluateProps(g, props, players, logs, box, proj, prices) {
+  const picks = [];
+  if (g.state === 'post') return { picks };
   const live = g.state === 'in';
   const f = live ? secondsRemaining(g) / 3600 : 1;
   const implied = (teamId) => {
@@ -298,6 +338,7 @@ export function evaluateProps(g, props, players, logs, box, proj) {
     const cur = box?.[pr.athleteId];
     const def = PROP_TYPES[pr.typeId];
     const ms = MILESTONE_TYPES[pr.typeId];
+    const who = { athleteId: pr.athleteId, typeId: pr.typeId, player: pl.name, pos: pl.pos };
     if (def && pr.line != null) {
       const vals = seriesFor(log, def.stats);
       const pj = projectStat(vals, def.cv);
@@ -312,107 +353,114 @@ export function evaluateProps(g, props, players, logs, box, proj) {
       if (!r) continue;
       const hits = vals.filter((v) => v > pr.line).length;
       const base = {
-        market: 'prop', athleteId: pr.athleteId, typeId: pr.typeId, player: pl.name, pos: pl.pos, line: pr.line,
-        price: EST_PROP_PRICE, priceEst: true, projection: r.proj, stat: def.short, current: liveCtx?.cur,
+        ...who, market: 'prop', line: pr.line, projection: r.proj, stat: def.short, current: liveCtx?.cur,
+        // DraftKings prices yardage-style lines near even money; low lines (0.5 receptions) are lopsided.
+        balanced: def.dist !== 'p' && pr.line >= 15,
         // Live, only trust a prop line the feed has refreshed in the last 10 minutes.
         stale: live && !(pr.lastUpdated && Date.now() - Date.parse(pr.lastUpdated) < 10 * 6e4),
+        // Miles from the line pregame means the player's role has probably changed.
+        suspect: def.dist !== 'p' && !live && pr.line >= 15 && Math.abs(pj.mean - pr.line) > 0.25 * pr.line,
+        reason: live
+          ? `Has ${liveCtx.cur}, on pace for ${r.proj.toFixed(1)} · line ${pr.line}`
+          : `Projects ${r.proj.toFixed(1)} · last 4 avg ${pj.recent.toFixed(1)}, season ${pj.season.toFixed(1)} · over in ${hits} of ${pj.n}`,
       };
-      const reason = live
-        ? `Has ${liveCtx.cur}, on pace for ${r.proj.toFixed(1)} · line ${pr.line}`
-        : `Projects ${r.proj.toFixed(1)} · last 4 avg ${pj.recent.toFixed(1)}, season ${pj.season.toFixed(1)} · over in ${hits} of ${pj.n}`;
-      // Count markets (sacks, TDs, FGs) are never priced near -114, so they get a fair price, not a grade.
-      // And when we are miles from the line, the player's role has probably changed — don't bet our stale number.
-      const flags = {
-        fairOnly: def.dist === 'p',
-        suspect: def.dist !== 'p' && !live && Math.abs(pj.mean - pr.line) > Math.max(0.25 * pr.line, 1.5),
-      };
-      for (const [side, prob] of [['over', r.p], ['under', 1 - r.p]]) {
-        const pk = mkPick(g, { ...base, ...flags, side, label: `${pl.name} ${side === 'over' ? 'Over' : 'Under'} ${pr.line} ${def.short}`, prob, reason });
-        // A live line that hasn't moved since kickoff is not a price you can actually get.
-        if (flags.fairOnly || flags.suspect || base.stale) { pk.grade = null; pk.units = 0; pk.fair = probToAmerican(prob); }
-        out.picks.push(pk);
-      }
+      picks.push(mkProp(g, { ...base, side: 'over', label: `${pl.name} Over ${pr.line} ${def.short}`, prob: r.p }, prices));
+      picks.push(mkProp(g, { ...base, side: 'under', label: `${pl.name} Under ${pr.line} ${def.short}`, prob: 1 - r.p }, prices));
     } else if (ms && pr.line != null && !live) {
-      const pj = projectStat(seriesFor(log, ms.stats), ms.cv);
+      const vals = seriesFor(log, ms.stats);
+      const pj = projectStat(vals, ms.cv);
       if (!pj) continue;
-      const p = Math.min(0.97, Math.max(0.02, 1 - normCdf((pr.line - 0.5 - pj.mean) / pj.sd)));
-      out.ladders.push({ athleteId: pr.athleteId, player: pl.name, pos: pl.pos, stat: ms.short, line: pr.line, prob: p, fair: probToAmerican(p) });
+      const raw = ms.count ? 1 - poissonCdf(pr.line - 1, Math.max(pj.mean, 0.01)) : 1 - normCdf((pr.line - 0.5 - pj.mean) / pj.sd);
+      picks.push(mkProp(g, {
+        ...who, market: 'ms', side: 'yes', line: pr.line, stat: ms.short, prob: clamp(raw, 0.02, 0.97), projection: pj.mean,
+        label: `${pl.name} ${pr.line}+ ${ms.short}`,
+        reason: `Projects ${pj.mean.toFixed(1)} · reached ${pr.line} in ${vals.filter((v) => v >= pr.line).length} of ${pj.n}`,
+      }, prices));
     } else if (TD_TYPES[pr.typeId]) {
-      const tdStats = pl.pos === 'QB' ? ['rushingTouchdowns'] : ['rushingTouchdowns', 'receivingTouchdowns'];
-      const vals = (log || []).map((r) => tdStats.reduce((t, s) => t + (r[s] || 0), 0));
+      const tdStats = pl.pos === 'QB' ? ['rushingTouchdowns'] : TD_STATS;
+      const vals = log.map((r) => tdStats.reduce((t, s) => t + (r[s] || 0), 0));
       if (vals.length < 3) continue;
       const have = cur ? tdStats.reduce((t, s) => t + (cur[s] || 0), 0) : 0;
       const need = (pr.typeId === '32' ? 2 : 1) - have;
       if (need <= 0) continue;
-      const raw = vals.reduce((a, b) => a + b, 0) / vals.length;
-      const lam = Math.max(0.01, raw * (vals.length / (vals.length + 2)) * (implied(pl.teamId) / 22) * f);
-      const p = Math.min(0.9, 1 - poissonCdf(need - 1, lam));
-      out.tds.push({ athleteId: pr.athleteId, player: pl.name, pos: pl.pos, kind: TD_TYPES[pr.typeId], prob: p, fair: probToAmerican(p), rate: raw });
+      const rate = vals.reduce((a, b) => a + b, 0) / vals.length;
+      const lam = Math.max(0.01, rate * (vals.length / (vals.length + 2)) * (implied(pl.teamId) / 22) * f);
+      picks.push(mkProp(g, {
+        ...who, market: 'td', side: 'yes', line: null, stat: TD_TYPES[pr.typeId], prob: Math.min(0.9, 1 - poissonCdf(need - 1, lam)),
+        label: `${pl.name} ${TD_TYPES[pr.typeId]}`,
+        reason: `Scored in ${vals.filter((v) => v > 0).length} of ${vals.length} games · ${rate.toFixed(2)} TDs a game${have ? ` · has ${have} tonight` : ''}`,
+      }, prices));
     }
   }
-  return out;
+  // If one of a player's lines is far from his form, his role has changed — distrust all of them.
+  const shaky = new Set(picks.filter((p) => p.suspect).map((p) => p.athleteId));
+  for (const p of picks) if (shaky.has(p.athleteId)) Object.assign(p, { suspect: true, lead: false, grade: null, units: 0 });
+  return { picks };
 }
+const TD_STATS = ['rushingTouchdowns', 'receivingTouchdowns'];
 
-// Team total points (DK alt ladder; we grade the rung nearest the implied team total).
-export function evaluateTeamTotals(g, rows, proj) {
-  if (!proj || g.state === 'post') return [];
+// Team total points. DraftKings lists a ladder of lines; the main one sits at the market's implied
+// team total, so that is the rung we evaluate.
+export function evaluateTeamTotals(g, rows, proj, prices) {
+  const o = g.odds;
+  if (!proj || g.state === 'post' || o?.total == null || o?.spreadHome == null) return [];
   const picks = [];
   for (const side of ['home', 'away']) {
-    const team = g[side];
+    const team = g[side], sign = side === 'home' ? 1 : -1;
     const lines = rows.filter((r) => r.teamId === team.id).map((r) => r.line);
     if (!lines.length) continue;
-    const exp = (proj.total + (side === 'home' ? 1 : -1) * proj.margin) / 2;
-    const line = lines.reduce((b, l) => (Math.abs(l - exp) < Math.abs(b - exp) ? l : b));
-    if (proj.live && team.score > line) continue;
-    const sd = SD_TEAM * Math.sqrt(Math.max(proj.f, 0.004));
-    const fair = line + 0.4 * (exp - line);
-    const p = Math.min(0.95, Math.max(0.05, 1 - normCdf((line - fair) / sd)));
-    const base = { market: 'teamtotal', line, price: EST_PROP_PRICE, priceEst: true, typeId: team.id,
+    const mkt = (o.total - sign * o.spreadHome) / 2;
+    const line = lines.reduce((b, l) => (Math.abs(l - mkt) < Math.abs(b - mkt) ? l : b));
+    if (Math.abs(line - mkt) > 1.5 || (proj.live && team.score > line)) continue;
+    const exp = (proj.total + sign * proj.margin) / 2;
+    const p = clamp(1 - normCdf((line - exp) / (SD_TEAM * Math.sqrt(Math.max(proj.f, 0.004)))), 0.05, 0.95);
+    const base = { market: 'teamtotal', line, typeId: team.id, balanced: true, stat: 'Team Total', projection: exp,
       reason: `Projects ${team.abbr} for ${exp.toFixed(1)} points vs line ${line}` };
-    picks.push(mkPick(g, { ...base, side: 'over', label: `${team.abbr} Team Total Over ${line}`, prob: p }));
-    picks.push(mkPick(g, { ...base, side: 'under', label: `${team.abbr} Team Total Under ${line}`, prob: 1 - p }));
+    picks.push(mkProp(g, { ...base, side: 'over', label: `${team.abbr} Team Total Over ${line}`, prob: p }, prices));
+    picks.push(mkProp(g, { ...base, side: 'under', label: `${team.abbr} Team Total Under ${line}`, prob: 1 - p }, prices));
   }
   return picks;
 }
 
-// Keep the better side of each market, ranked by expected value.
-export function rankPicks(picks) {
+const bestPerMarket = (picks, keep, score) => {
   const best = new Map();
   for (const p of picks) {
-    if (!p.grade) continue;
+    if (!keep(p)) continue;
     const k = [p.gameId, p.market, p.athleteId || '', p.typeId || ''].join('|');
-    if (!best.has(k) || best.get(k).ev < p.ev) best.set(k, p);
+    if (!best.has(k) || score(best.get(k)) < score(p)) best.set(k, p);
   }
-  // Estimated-price props rank below real-price bets at the same EV.
-  const score = (p) => p.ev - (p.priceEst ? 0.01 : 0) - (p.stale ? 0.02 : 0);
   return [...best.values()].sort((a, b) => score(b) - score(a));
-}
+};
+// Bets with a real price that clear the bar, best first.
+export const rankPicks = (picks) => bestPerMarket(picks, (p) => p.grade, (p) => p.ev);
+// Unpriced props the model leans on hardest — candidates for a price check.
+export const rankLeads = (picks) => bestPerMarket(picks, (p) => p.lead, (p) => p.model);
 
 // ---------- settling tracked bets ----------
 export function settle(bet, g, box) {
   if (!g) return { status: 'open' };
   const done = g.state === 'post';
   const hs = g.home.score, as = g.away.score;
-  let cur, target = bet.line, over = bet.side === 'over';
-  if (bet.market === 'spread') {
-    const m = (bet.side === 'home' ? hs - as : as - hs) + bet.line;
-    return { status: !done ? 'open' : m > 0 ? 'won' : m < 0 ? 'lost' : 'push', note: `${g.away.abbr} ${as} – ${g.home.abbr} ${hs}`, winning: m > 0 };
-  }
-  if (bet.market === 'ml') {
-    const m = bet.side === 'home' ? hs - as : as - hs;
+  let cur, target = bet.line, over = bet.side !== 'under';
+  if (bet.market === 'spread' || bet.market === 'ml') {
+    const m = (bet.side === 'home' ? hs - as : as - hs) + (bet.market === 'spread' ? bet.line : 0);
     return { status: !done ? 'open' : m > 0 ? 'won' : m < 0 ? 'lost' : 'push', note: `${g.away.abbr} ${as} – ${g.home.abbr} ${hs}`, winning: m > 0 };
   }
   if (bet.market === 'total') cur = hs + as;
   else if (bet.market === 'teamtotal') cur = bet.typeId === g.home.id ? hs : as;
-  else if (bet.market === 'prop') {
-    const def = PROP_TYPES[bet.typeId];
+  else {
+    const stats = bet.market === 'td' ? TD_STATS : (PROP_TYPES[bet.typeId] || MILESTONE_TYPES[bet.typeId])?.stats;
     const row = box?.[bet.athleteId];
-    cur = row && def ? sumStats(row, def.stats) ?? 0 : g.state === 'pre' ? 0 : null;
-    if (cur == null) return { status: 'open' };
+    if (!stats || (!row && g.state !== 'pre' && !box)) return { status: 'open' };
+    cur = row ? stats.reduce((t, s) => t + (row[s] || 0), 0) : 0;
+    // "Yes" markets win on reaching the number; express that as beating number - 0.5.
+    if (bet.market === 'td') target = (bet.typeId === '32' ? 2 : 1) - 0.5;
+    if (bet.market === 'ms') target = bet.line - 0.5;
   }
   let status = 'open';
   if (over && cur > target) status = 'won';
   else if (done) status = cur === target ? 'push' : over ? 'lost' : cur < target ? 'won' : 'lost';
   else if (!over && cur > target) status = 'lost';
-  return { status, cur, target, winning: over ? cur > target : cur < target };
+  const shown = bet.market === 'td' || bet.market === 'ms' ? target + 0.5 : target;
+  return { status, cur, target: shown, winning: over ? cur > target : cur < target };
 }

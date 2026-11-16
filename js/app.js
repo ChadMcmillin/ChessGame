@@ -1,6 +1,6 @@
 import * as api from './espn.js';
 import {
-  buildRatings, evaluateGame, evaluateProps, evaluateTeamTotals, rankPicks, settle,
+  buildRatings, evaluateGame, evaluateProps, evaluateTeamTotals, rankPicks, rankLeads, settle, gradeAt,
   fmtOdds, fmtLine, PROP_TYPES, MILESTONE_TYPES, TD_TYPES,
 } from './model.js';
 
@@ -16,7 +16,7 @@ const S = {
   data: {}, // gameId -> { sum, props, players }
   logs: {}, // athleteId -> game log rows
   ev: {}, // gameId -> { picks, proj, tds, ladders }
-  picks: [], scanned: 0, known: new Set(), armed: false,
+  picks: [], leads: [], scanned: 0, prices: ls.get('prices', {}), known: new Set(), armed: false,
   tab: 'picks', filter: 'all', open: null, sub: 'bets',
   bets: ls.get('bets', []), pre: ls.get('pre', {}),
   updated: 0, error: null, loading: new Set(),
@@ -36,6 +36,9 @@ async function tick() {
       if (g.state === 'pre' && g.odds?.spreadHome != null) S.pre[g.id] = { spreadHome: g.odds.spreadHome, total: g.odds.total };
     }
     ls.set('pre', Object.fromEntries(Object.entries(S.pre).slice(-40)));
+    // Entered prices only make sense while their game is still on the board.
+    const onBoard = new Set(S.games.filter((g) => g.state !== 'post').map((g) => g.id));
+    if (S.games.length) for (const k of Object.keys(S.prices)) if (!onBoard.has(k.split('|')[0])) delete S.prices[k];
     if (Date.now() - S.ratingsAt > 15 * 6e4) {
       S.ratingsAt = Date.now();
       api.seasonResults(sb.season, sb.seasonType, sb.week).then((res) => { S.ratings = buildRatings(res); refresh(); }).catch(() => {});
@@ -91,19 +94,18 @@ function refresh() {
     const wp = g.situation?.wpHome ?? (g.state === 'in' && d.sum?.wp?.length ? d.sum.wp[d.sum.wp.length - 1] : null);
     const pre = g.state === 'pre' ? g.odds : S.pre[g.id];
     const { picks, proj } = evaluateGame(g, S.ratings, pre, wp);
-    const e = { picks: [...picks], proj, tds: [], ladders: [], wp };
+    const e = { picks: [...picks], proj, wp };
     if (d.props) {
-      const pp = evaluateProps(g, d.props, d.players, S.logs, d.sum?.box, proj);
-      e.picks.push(...pp.picks, ...evaluateTeamTotals(g, d.props.filter((p) => p.typeId === '98' && p.line != null), proj));
-      e.tds = pp.tds.sort((a, b) => b.prob - a.prob);
-      e.ladders = pp.ladders;
+      e.picks.push(...evaluateProps(g, d.props, d.players, S.logs, d.sum?.box, proj, S.prices).picks,
+        ...evaluateTeamTotals(g, d.props.filter((p) => p.typeId === '98' && p.line != null), proj, S.prices));
     }
-    scanned += e.picks.length / 2 + e.tds.length + e.ladders.length;
+    scanned += e.picks.filter((p) => p.side === 'over' || p.side === 'home' || p.side === 'yes').length;
     S.ev[g.id] = e;
     all.push(...e.picks);
   }
   S.scanned = Math.round(scanned);
   S.picks = rankPicks(all);
+  S.leads = rankLeads(all);
   // Tell the user when a new top-grade opportunity appears — but not during the initial research pass.
   const top = S.picks.filter((p) => p.grade === 'A');
   if (S.armed && !S.loading.size) {
@@ -134,49 +136,74 @@ const statusTxt = (g) => (g.state === 'pre' ? gameTime(g) : g.state === 'in' ? (
 const pct = (p) => `${(p * 100).toFixed(0)}%`;
 const logo = (t, cls = '') => `<img class="logo ${cls}" src="${esc(t.logo)}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">`;
 
+const isProp = (p) => p.market === 'prop' || p.market === 'td' || p.market === 'ms' || p.market === 'teamtotal';
+const allPicks = () => Object.values(S.ev).flatMap((e) => e.picks);
+const findPick = (key) => allPicks().find((p) => p.key === key);
+const isTracked = (p) => S.bets.some((b) => (b.pick || b.id) === p.key && !b.final);
+const dkLink = (g) => (g?.odds?.link ? `<a class="btn ghost" href="${esc(g.odds.link)}" target="_blank" rel="noopener" data-act="ext">Open in DraftKings ↗</a>` : '');
+
 function pickCard(p, compact) {
   const g = S.games.find((x) => x.id === p.gameId);
-  const tracked = S.bets.some((b) => b.id === p.id && !b.final);
-  return `<article class="card pick" data-act="open" data-id="${p.gameId}">
-    <div class="row">
-      <span class="grade g${p.grade || 'N'}">${p.grade || '–'}</span>
+  const head = (badge, price) => `<div class="row">${badge}
       <div class="grow">
         <div class="title">${esc(p.label)}</div>
         <div class="sub">${p.live ? '<span class="live">LIVE</span> ' : ''}${compact ? '' : esc(p.matchup) + ' · '}${g ? esc(statusTxt(g)) : ''}</div>
+      </div>${price}</div>`;
+  if (p.needsPrice) {
+    // The feed has this line but not DraftKings' price, so no odds are shown until the user supplies them.
+    return `<article class="card pick" data-act="open" data-id="${p.gameId}">
+      ${head('<span class="grade gQ">?</span>', '<div class="price"><b>—</b><small>price needed</small></div>')}
+      <div class="stats three">
+        <div><small>Model chance</small><b>${pct(p.model)}</b></div>
+        <div><small>Fair price</small><b>${fmtOdds(p.fair)}</b></div>
+        <div><small>Bet at</small><b>${fmtOdds(p.beat)} or better</b></div>
       </div>
-      <div class="price"><b>${fmtOdds(p.price)}</b><small>${p.priceEst ? 'est. price' : 'DraftKings'}</small></div>
-    </div>
+      <p class="reason">${esc(p.reason)}</p>
+      <div class="actions"><button class="btn" data-act="price" data-key="${esc(p.key)}">Enter DraftKings price</button>${dkLink(g)}</div>
+    </article>`;
+  }
+  const tracked = isTracked(p);
+  const price = p.priceUser
+    ? `<button class="price edit" data-act="price" data-key="${esc(p.key)}"><b>${fmtOdds(p.price)}</b><small>your price ✎</small></button>`
+    : `<div class="price"><b>${fmtOdds(p.price)}</b><small>DraftKings</small></div>`;
+  return `<article class="card pick" data-act="open" data-id="${p.gameId}">
+    ${head(`<span class="grade g${p.grade || 'N'}">${p.grade || '–'}</span>`, price)}
     <div class="stats">
       <div><small>Win chance</small><b>${pct(p.prob)}</b></div>
       <div><small>Need</small><b>${pct(p.breakeven)}</b></div>
       <div><small>Edge</small><b class="${p.ev > 0 ? 'pos' : 'neg'}">${p.ev > 0 ? '+' : ''}${(p.ev * 100).toFixed(1)}%</b></div>
       <div><small>Stake</small><b>${p.units ? p.units + 'u' : '—'}</b></div>
     </div>
-    <p class="reason">${esc(p.reason)}${p.stale ? '' : ''}</p>
+    <p class="reason">${esc(p.reason)}</p>
     <div class="actions">
-      <button class="btn ${tracked ? 'on' : ''}" data-act="track" data-pick="${esc(p.id)}">${tracked ? '✓ Tracking' : '＋ Track bet'}</button>
-      ${g?.odds?.link ? `<a class="btn ghost" href="${esc(g.odds.link)}" target="_blank" rel="noopener" data-act="ext">Open in DraftKings ↗</a>` : ''}
+      <button class="btn ${tracked ? 'on' : ''}" data-act="track" data-key="${esc(p.key)}">${tracked ? '✓ Tracking' : '＋ Track bet'}</button>${dkLink(g)}
     </div>
   </article>`;
 }
 
+const LEADS_NOTE = '<h2>Props to price-check</h2><p class="fine">The data feed has DraftKings’ prop lines but not its prop prices, so these have no odds yet. They are the model’s strongest leans. Enter the price DraftKings is showing to see the real edge.</p>';
+
 function viewPicks() {
   const f = S.filter;
-  const list = S.picks.filter((p) => f === 'all' || (f === 'live' && p.live) || (f === 'pre' && !p.live) || (f === 'props' && p.market === 'prop') || (f === 'lines' && p.market !== 'prop'));
+  const match = (p) => f === 'all' || (f === 'live' && p.live) || (f === 'pre' && !p.live) || (f === 'props' && isProp(p)) || (f === 'lines' && !isProp(p));
+  const list = S.picks.filter(match), leads = S.leads.filter(match);
   const chips = [['all', 'All'], ['live', 'Live'], ['pre', 'Pregame'], ['lines', 'Game lines'], ['props', 'Player props']]
     .map(([k, t]) => `<button class="chip ${f === k ? 'on' : ''}" data-act="filter" data-f="${k}">${t}${k === 'live' && S.picks.some((p) => p.live) ? ' <i class="dot"></i>' : ''}</button>`).join('');
   const loading = S.loading.size || !S.ratings;
   let body;
-  if (list.length) body = list.slice(0, 60).map((p) => pickCard(p)).join('');
-  else if (!S.updated) body = skeleton();
-  else body = `<div class="empty"><b>${loading ? 'Researching the slate…' : 'No edges right now'}</b><p>${loading
-    ? 'Pulling DraftKings lines, team results and player game logs.'
-    : S.games.some((g) => g.state !== 'post') ? `Checked ${S.scanned} markets and nothing clears the bar. Passing is a position too — this list updates on its own as lines and games move.`
-      : 'No upcoming or live games on the board this week.'}</p></div>`;
+  if (!S.updated) body = skeleton();
+  else {
+    body = list.length ? list.slice(0, 60).map((p) => pickCard(p)).join('')
+      : `<div class="empty ${leads.length ? 'slim' : ''}"><b>${loading ? 'Researching the slate…' : 'No graded bets right now'}</b><p>${loading
+        ? 'Pulling DraftKings lines, team results and player game logs.'
+        : S.games.some((g) => g.state !== 'post') ? `Checked ${S.scanned} markets and nothing with a confirmed price clears the bar. This list updates on its own as lines and games move.`
+          : 'No upcoming or live games on the board this week.'}</p></div>`;
+    if (leads.length) body += LEADS_NOTE + leads.slice(0, 15).map((p) => pickCard(p)).join('');
+  }
   return `<div class="chips">${chips}</div>
     <div class="scanline">${loading ? '<i class="spin"></i>' : '<i class="dot"></i>'} ${S.scanned} markets checked · ${S.games.filter((g) => g.state === 'in').length} live, ${S.games.filter((g) => g.state === 'pre').length} upcoming</div>
     ${body}
-    <p class="fine">Edges are model estimates, not guarantees. “est. price” means the feed gave DraftKings’ line but not its price, so −114 is assumed — check the real price before betting. 1u = 1% of bankroll. 21+. Problem gambling help: 1-800-GAMBLER.</p>`;
+    <p class="fine">Edges are model estimates, not guarantees. Game-line prices come from the DraftKings feed; prop prices are only ever the ones you enter. 1u = 1% of bankroll. 21+. Problem gambling help: 1-800-GAMBLER.</p>`;
 }
 const skeleton = () => '<div class="card sk"></div><div class="card sk"></div><div class="card sk"></div>';
 
@@ -213,11 +240,11 @@ function viewBets() {
   const card = (b) => {
     const r = b.final ? { status: b.final } : b.live || { status: 'open' };
     const g = S.games.find((x) => x.id === b.gameId);
-    const prog = r.cur != null ? `<div class="prog"><i class="${r.winning ? 'ok' : ''}" style="width:${Math.min(100, (r.cur / Math.max(b.line, 1)) * 100)}%"></i></div><div class="sub">${r.cur} of ${b.line}${b.side === 'under' ? ' (needs to stay under)' : ''}</div>` : r.note ? `<div class="sub">${esc(r.note)}</div>` : '';
+    const prog = r.cur != null ? `<div class="prog"><i class="${r.winning ? 'ok' : ''}" style="width:${Math.min(100, (r.cur / Math.max(r.target, 1)) * 100)}%"></i></div><div class="sub">${r.cur} of ${r.target}${b.side === 'under' ? ' (needs to stay under)' : ''}</div>` : r.note ? `<div class="sub">${esc(r.note)}</div>` : '';
     const st = r.status === 'open' ? (g?.state === 'in' ? (r.winning ? 'Winning' : 'Trailing') : 'Pending') : r.status[0].toUpperCase() + r.status.slice(1);
     return `<article class="card bet">
       <div class="row"><div class="grow"><div class="title">${esc(b.label)}</div>
-        <div class="sub">${esc(b.matchup)} · ${fmtOdds(b.price)}${b.priceEst ? ' est.' : ''} · ${b.units || 1}u${g ? ' · ' + esc(statusTxt(g)) : ''}</div></div>
+        <div class="sub">${esc(b.matchup)} · ${fmtOdds(b.price)} · ${b.units || 1}u${g ? ' · ' + esc(statusTxt(g)) : ''}</div></div>
         <span class="status s-${r.status} ${r.status === 'open' && g?.state === 'in' ? (r.winning ? 'up' : 'down') : ''}">${st}</span></div>
       ${prog}
       <div class="actions"><button class="btn ghost" data-act="untrack" data-bet="${esc(b.key)}">Remove</button>${g ? `<button class="btn ghost" data-act="open" data-id="${g.id}">Game tracker</button>` : ''}</div>
@@ -273,10 +300,11 @@ function viewDetail(g) {
     .map(([k, t]) => `<button class="seg ${S.sub === k ? 'on' : ''}" data-act="sub" data-s="${k}">${t}</button>`).join('');
   let body = '';
   if (S.sub === 'bets') {
-    const mine = S.picks.filter((p) => p.gameId === g.id);
+    const mine = S.picks.filter((p) => p.gameId === g.id), leads = S.leads.filter((p) => p.gameId === g.id);
     body = g.state === 'post' ? '<div class="empty"><p>This game is final.</p></div>'
-      : mine.length ? mine.map((p) => pickCard(p, true)).join('')
-        : `<div class="empty"><b>${S.loading.has(g.id) || !S.ratings ? 'Researching…' : 'No edge on this game right now'}</b><p>${!o ? 'DraftKings has not posted lines yet.' : 'Every market here is priced within the model’s margin of error. It is re-checked on every update.'}</p></div>`;
+      : (mine.length ? mine.map((p) => pickCard(p, true)).join('')
+        : `<div class="empty ${leads.length ? 'slim' : ''}"><b>${S.loading.has(g.id) || !S.ratings ? 'Researching…' : 'No graded bet on this game right now'}</b><p>${!o ? 'DraftKings has not posted lines yet.' : 'The spread, total and moneyline are priced within the model’s margin of error. They are re-checked on every update.'}</p></div>`)
+        + (leads.length ? LEADS_NOTE + leads.slice(0, 8).map((p) => pickCard(p, true)).join('') : '');
   } else if (S.sub === 'props') body = viewProps(g, e, d);
   else if (S.sub === 'drives') {
     const dr = (d.sum?.drives || []).slice().reverse();
@@ -288,29 +316,41 @@ function viewDetail(g) {
     <div class="sheet-body">${head}<div class="segs">${tabs}</div>${body}</div>`;
 }
 
+// One prop line. Tapping it opens the price box; the chip shows the price to beat, or the real edge once priced.
+function propRow(p, left) {
+  const chip = p.suspect ? '<span class="lean">Role changed?</span>'
+    : p.price != null ? `<span class="lean ${p.grade ? 'g' + p.grade : ''}">${fmtOdds(p.price)} · ${p.ev > 0 ? '+' : ''}${(p.ev * 100).toFixed(1)}%</span>`
+      : `<span class="lean dash">${fmtOdds(p.beat)} or better</span>`;
+  return `<div class="prow ${p.suspect ? '' : 'tap'}" ${p.suspect ? '' : `data-act="price" data-key="${esc(p.key)}"`}><span class="grow">${left}</span>${chip}</div>`;
+}
+const groupBy = (list, fn) => {
+  const m = new Map();
+  for (const x of list) { const k = fn(x); if (!m.has(k)) m.set(k, []); m.get(k).push(x); }
+  return m;
+};
+
 function viewProps(g, e, d) {
   if (g.state === 'post') return '<div class="empty"><p>Props are closed for this game.</p></div>';
   if (!d.props) return `<div class="empty"><i class="spin"></i><p>Loading DraftKings props…</p></div>`;
-  const props = e.picks.filter((p) => p.market === 'prop');
-  const byPlayer = new Map();
-  for (const p of props) {
-    const k = p.athleteId + '|' + p.typeId;
-    const cur = byPlayer.get(k);
-    if (!cur || p.prob > cur.prob) byPlayer.set(k, p); // keep the leaning side
-  }
-  const players = new Map();
-  for (const p of [...byPlayer.values()].sort((a, b) => !!b.grade - !!a.grade || b.ev - a.ev)) (players.get(p.athleteId) || players.set(p.athleteId, []).get(p.athleteId)).push(p);
-  const ou = [...players.values()].map((rows) => `<div class="card pl"><div class="title">${esc(rows[0].player)} <small>${esc(rows[0].pos)}</small></div>
-    ${rows.map((p) => `<div class="prow"><span class="grow">${esc(p.stat)} <b>${p.line}</b>${p.current != null ? ` <small>has ${p.current}</small>` : ''}</span>
-      <span class="muted">proj ${p.projection.toFixed(1)}</span>
-      <span class="lean ${p.grade ? 'g' + p.grade : ''}">${p.stale ? 'Pregame line' : p.suspect ? 'Role changed?' : `${p.side === 'over' ? 'Over' : 'Under'} ${pct(p.prob)}${p.fairOnly ? ` · fair ${fmtOdds(p.fair)}` : ''}`}</span></div>`).join('')}</div>`).join('');
-  const tds = e.tds.filter((t) => t.kind === 'Anytime TD').slice(0, 14);
-  const lad = new Map();
-  for (const l of e.ladders) (lad.get(l.player + ' · ' + l.stat) || lad.set(l.player + ' · ' + l.stat, []).get(l.player + ' · ' + l.stat)).push(l);
-  return `${!d.ready ? '<div class="scanline"><i class="spin"></i> Reading player game logs…</div>' : ''}
-    ${ou ? `<h2>Over / under lines</h2><p class="fine">DraftKings line, the model’s projection, and which side it leans. Highlighted leans clear the assumed −114 price. “Fair” means bet only at that price or better. “Role changed?” means the line is far from the player’s season form, so the model stands down.</p>${ou}` : d.ready ? '<div class="empty"><p>No over/under props posted yet.</p></div>' : ''}
-    ${tds.length ? `<h2>Anytime touchdown — fair price</h2><p class="fine">Bet only if DraftKings pays better than the fair price shown.</p><div class="card">${tds.map((t) => `<div class="prow"><span class="grow">${esc(t.player)} <small>${esc(t.pos)}</small></span><span class="muted">${pct(t.prob)}</span><span class="lean">${fmtOdds(t.fair)} or better</span></div>`).join('')}</div>` : ''}
-    ${lad.size ? `<h2>Yardage milestones — fair price</h2><div class="card">${[...lad.entries()].slice(0, 30).map(([k, rows]) => `<details><summary>${esc(k)}</summary>${rows.sort((a, b) => a.line - b.line).map((r) => `<div class="prow"><span class="grow">${r.line}+</span><span class="muted">${pct(r.prob)}</span><span class="lean">${fmtOdds(r.fair)} or better</span></div>`).join('')}</details>`).join('')}</div>` : ''}`;
+  // Per market show one side: the one the user priced, otherwise the one the model leans to.
+  const rank = (p) => (p.price != null ? 2 : 0) + p.model;
+  const sides = [...groupBy(e.picks.filter((p) => p.market === 'prop' || p.market === 'teamtotal'), (p) => [p.market, p.athleteId, p.typeId, p.line].join('|')).values()]
+    .map((pair) => pair.reduce((a, b) => (rank(b) > rank(a) ? b : a)));
+  const ouRow = (p) => propRow(p, `${esc(p.stat)} <b>${p.line}</b>${p.current != null ? ` <small>has ${p.current}</small>` : ''}
+    <small class="blk">${p.side === 'over' ? 'Over' : 'Under'} ${pct(p.model)} · projects ${p.projection.toFixed(1)}${p.stale ? ' · pregame line' : ''}</small>`);
+  const order = (rows) => rows.sort((a, b) => !!b.grade - !!a.grade || b.lead - a.lead || b.model - a.model);
+  const players = [...groupBy(order(sides.filter((p) => p.market === 'prop')), (p) => p.athleteId).values()];
+  const ou = players.map((rows) => `<div class="card pl"><div class="title">${esc(rows[0].player)} <small>${esc(rows[0].pos)}</small></div>${rows.map(ouRow).join('')}</div>`).join('');
+  const tt = sides.filter((p) => p.market === 'teamtotal');
+  const tds = e.picks.filter((p) => p.market === 'td' && p.typeId === '31').sort((a, b) => b.model - a.model).slice(0, 16);
+  const yes = (p, name) => propRow(p, `${name}<small class="blk">${pct(p.model)} chance · fair ${fmtOdds(p.fair)}</small>`);
+  const lad = [...groupBy(e.picks.filter((p) => p.market === 'ms'), (p) => `${p.player} · ${p.stat}`).entries()].slice(0, 40);
+  return `<p class="fine">These are DraftKings’ lines, but the feed doesn’t carry its prop prices. Each row shows the worst price still worth betting. <b>Tap a row to enter the price DraftKings is showing</b> and get the real edge.</p>
+    ${!d.ready ? '<div class="scanline"><i class="spin"></i> Reading player game logs…</div>' : ''}
+    ${ou ? `<h2>Over / under</h2>${ou}` : d.ready ? '<div class="empty"><p>No over/under props posted yet.</p></div>' : ''}
+    ${tt.length ? `<h2>Team totals</h2><div class="card">${tt.map((p) => propRow(p, `${esc(p.label.replace(/ (Over|Under) .*/, ''))} <b>${p.line}</b><small class="blk">${p.side === 'over' ? 'Over' : 'Under'} ${pct(p.model)} · projects ${p.projection.toFixed(1)}</small>`)).join('')}</div>` : ''}
+    ${tds.length ? `<h2>Anytime touchdown</h2><div class="card">${tds.map((p) => yes(p, `${esc(p.player)} <small>${esc(p.pos)}</small>`)).join('')}</div>` : ''}
+    ${lad.length ? `<h2>Milestones</h2><div class="card">${lad.map(([k, rows]) => `<details><summary>${esc(k)}</summary>${rows.sort((a, b) => a.line - b.line).map((p) => yes(p, `<b>${p.line}+</b>`)).join('')}</details>`).join('')}</div>` : ''}`;
 }
 
 function viewIntel(g, e, d) {
@@ -333,7 +373,7 @@ function viewIntel(g, e, d) {
   return `<div class="card">${rows.map(([k, v]) => `<div class="prow"><span class="grow muted">${k}</span><b>${esc(v)}</b></div>`).join('') || '<p class="muted">Model numbers appear once three weeks of results exist.</p>'}</div>
     ${stat ? `<h2>Team stats</h2><table class="cmp"><tr><td><b>${esc(ts[0].abbr)}</b></td><th></th><td><b>${esc(ts[1].abbr)}</b></td></tr>${stat}</table>` : ''}
     ${inj ? `<h2>Injury report</h2><div class="card">${inj}</div>` : ''}
-    <p class="fine">How it works: team strength comes from every result this season (offense and defense rated separately, adjusted for opponent and home field). Player projections weight recent games more. Every number is then pulled partway toward DraftKings’ line, and a bet is only suggested when the remaining gap beats the price. Live, the projection re-runs from the score, clock, possession and field position on each update.</p>`;
+    <p class="fine">How it works: team strength comes from every result this season (offense and defense rated separately, adjusted for opponent and home field). Player projections weight recent games more. Every number is then pulled partway toward DraftKings’ own, and a bet is only graded when the remaining gap beats a real price — the feed’s for game lines, the one you enter for props. Live, the projection re-runs from the score, clock, possession and field position on each update.</p>`;
 }
 
 let lastHtml = {};
@@ -376,14 +416,15 @@ document.addEventListener('click', (ev) => {
   if (el.dataset.tab) { S.tab = el.dataset.tab; window.scrollTo(0, 0); return render(); }
   const act = el.dataset.act;
   if (act === 'ext') return ev.stopPropagation();
+  if (act === 'price') { ev.stopPropagation(); return openPricer(el.dataset.key); }
   if (act === 'track') {
     ev.stopPropagation();
-    const p = S.picks.find((x) => x.id === el.dataset.pick) || Object.values(S.ev).flatMap((e) => e.picks).find((x) => x.id === el.dataset.pick);
-    const i = S.bets.findIndex((b) => b.id === el.dataset.pick && !b.final);
+    const key = el.dataset.key, p = findPick(key);
+    const i = S.bets.findIndex((b) => (b.pick || b.id) === key && !b.final);
     if (i >= 0) S.bets.splice(i, 1);
-    else if (p) {
-      const { id, gameId, market, side, athleteId, typeId, label, line, price, priceEst, matchup, units } = p;
-      S.bets.unshift({ key: id + ':' + Date.now(), id, gameId, market, side, athleteId, typeId, label, line, price, priceEst, matchup, units: units || 1 });
+    else if (p && p.price != null) {
+      const { id, gameId, market, side, athleteId, typeId, label, line, price, matchup, units } = p;
+      S.bets.unshift({ key: key + ':' + Date.now(), pick: key, id, gameId, market, side, athleteId, typeId, label, line, price, matchup, units: units || 1 });
     }
     saveBets(); lastHtml = {}; return refresh();
   }
@@ -400,6 +441,47 @@ document.addEventListener('click', (ev) => {
     if (g) loadDeep(g);
   }
 });
+// ---------- entering a real DraftKings price for a prop ----------
+const P = { key: null, sign: -1 };
+function pricerPreview() {
+  const p = findPick(P.key), n = parseInt($('#pr-val').value, 10), out = $('#pr-out');
+  $('#pr-sign').textContent = P.sign < 0 ? '−' : '+';
+  $('#pr-save').disabled = !(p && n >= 100);
+  if (!p || !$('#pr-val').value) { out.textContent = ''; return null; }
+  if (!(n >= 100)) { out.textContent = 'American odds are 100 or more, like −224 or +150.'; return null; }
+  const price = P.sign * n, r = gradeAt(p, price);
+  out.innerHTML = `At ${fmtOdds(price)} you need ${pct(r.breakeven)}; the model, after weighing DraftKings’ own view, says ${pct(r.prob)}.<br><b class="${r.ev > 0 ? 'pos' : 'neg'}">Edge ${r.ev > 0 ? '+' : ''}${(r.ev * 100).toFixed(1)}%</b> — ${r.grade ? `${r.grade}-grade bet, stake ${r.units}u` : p.suspect ? 'not graded: this line is far from the player’s form' : 'not a bet at this price'}.`;
+  return price;
+}
+function openPricer(key) {
+  const p = findPick(key);
+  if (!p) return;
+  P.key = key; P.sign = p.price > 0 ? 1 : -1;
+  $('#pr-label').textContent = p.label;
+  $('#pr-sub').textContent = `Model ${pct(p.model)} · fair price ${fmtOdds(p.fair)} · worth betting at ${fmtOdds(p.beat)} or better. Type the price DraftKings shows for this exact bet.`;
+  $('#pr-val').value = p.price != null ? Math.abs(p.price) : '';
+  $('#pr-clear').hidden = p.price == null;
+  $('#pricer').classList.add('show');
+  pricerPreview();
+  $('#pr-val').focus();
+}
+function closePricer(price) {
+  if (price !== undefined) {
+    if (price === null) delete S.prices[P.key]; else S.prices[P.key] = price;
+    ls.set('prices', S.prices);
+    lastHtml = {}; refresh();
+  }
+  $('#pricer').classList.remove('show');
+  $('#pr-val').blur();
+}
+$('#pr-val').addEventListener('input', (e) => { e.target.value = e.target.value.replace(/\D/g, '').slice(0, 5); pricerPreview(); });
+$('#pr-val').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#pr-save').click(); });
+$('#pr-sign').addEventListener('click', () => { P.sign = -P.sign; pricerPreview(); });
+$('#pr-save').addEventListener('click', () => { const price = pricerPreview(); if (price != null) closePricer(price); });
+$('#pr-clear').addEventListener('click', () => closePricer(null));
+$('#pr-cancel').addEventListener('click', () => closePricer());
+$('#pricer').addEventListener('click', (e) => { if (e.target.id === 'pricer') closePricer(); });
+
 window.addEventListener('popstate', () => { S.open = null; render(); });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
 setInterval(stamp, 1000);

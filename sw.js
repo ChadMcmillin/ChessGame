@@ -1,5 +1,5 @@
 // Caches the app shell so it opens instantly from the home screen. Live data is never cached here.
-const V = 'edge-v1';
+const V = 'edge-v2';
 const SHELL = ['./', 'index.html', 'css/app.css', 'js/app.js', 'js/espn.js', 'js/model.js', 'icon.svg', 'manifest.webmanifest'];
 self.addEventListener('install', (e) => e.waitUntil(caches.open(V).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting())));
 self.addEventListener('activate', (e) => e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k !== V).map((k) => caches.delete(k)))).then(() => self.clients.claim())));
