@@ -97,7 +97,7 @@ async function loadDeep(g) {
 
 // ---------- live DraftKings prop prices ----------
 const dkInterval = (g) => odds.SPEEDS[S.cfg.speed][g.state === 'in' ? 0 : hoursTo(g) < 6 ? 1 : 2];
-const wantsDk = (g) => !!S.cfg.key && !S.dkStop && g.state !== 'post' && (S.cfg.scope === 'all' || S.opened.has(g.id));
+const wantsDk = (g) => !!S.cfg.key && !S.dkStop && g.state !== 'post' && (S.cfg.scope === 'all' || (S.cfg.scope === 'open' && S.opened.has(g.id)));
 // Prices are only used while fresh; an old price is worse than no price.
 function dkFresh(g) {
   const x = S.dk[g.id];
@@ -400,6 +400,8 @@ function viewProps(g, e, d) {
   const note = e.dk
     ? `<div class="dkbar"><span><i class="dot"></i> <b>Live DraftKings lines and prices</b> · updated ${ago(e.dk)}</span><button class="btn ghost" data-act="dkpull" data-id="${g.id}">Refresh</button></div>
        <p class="fine">Each row shows DraftKings’ price and the edge at that price. Rows without a price can be tapped to enter one.</p>`
+    : S.cfg.key && !S.dkStop ? `<div class="dkbar"><span>Lines are from the free feed. Prices not loaded.</span><button class="btn" data-act="dkpull" data-id="${g.id}">Get DraftKings prices · ${odds.SETS[S.cfg.set].length} credits</button></div>
+       <p class="fine">Or tap any row to type a price in yourself.</p>`
     : `<p class="fine">These are DraftKings’ lines, but the free feed doesn’t carry its prop prices. Each row shows the worst price still worth betting. <b>Tap a row to enter the price DraftKings is showing</b>, or <button class="link" data-act="settings">turn on live prices</button>.</p>`;
   return `${note}
     ${!d.ready ? '<div class="scanline"><i class="spin"></i> Reading player game logs…</div>' : ''}
@@ -550,7 +552,7 @@ let draft = null;
 function settingsPaint() {
   document.querySelectorAll('#settings [data-cfg]').forEach((b) => b.classList.toggle('on', draft[b.dataset.cfg] === b.dataset.v));
   const e = odds.estimate(draft.set, draft.speed);
-  $('#st-est').innerHTML = `Each price check uses up to <b>${e.perPull} credits</b> per game: about <b>${e.perGame.toLocaleString()}</b> for one live game${draft.scope === 'all' ? `, and roughly <b>${e.sunday.toLocaleString()}</b> for a full Sunday with the app left open` : ''}. Checks only run while the app is on screen.`;
+  $('#st-est').innerHTML = `Each price check uses up to <b>${e.perPull} credits</b> per game: about <b>${e.perGame.toLocaleString()}</b> for one live game${draft.scope === 'all' ? `, and roughly <b>${e.sunday.toLocaleString()}</b> for a full Sunday with the app left open` : ''}. Checks only run while the app is on screen.${draft.scope === 'tap' ? ' <b>With “Only when I tap”, nothing is spent until you press the button on a game’s Props tab</b> — the free key’s 500 monthly credits cover about ' + Math.floor(500 / e.perPull) + ' checks.' : ''}`;
   $('#st-clear').hidden = !S.cfg.key;
 }
 function settingsStatus() {

@@ -61,7 +61,9 @@ From then on DraftKings' lines and prices replace the free feed's lines for ever
 
 The service bills in credits: one credit per market per game per check. Settings lets you choose
 which markets, how often, and which games, shows an estimate, and shows credits remaining. Checks
-only run while the app is on screen, and stop when credits run out. The key is stored only on the
+only run while the app is on screen, and stop when credits run out. The service's free key includes
+500 credits a month; with **Only when I tap** selected nothing is spent until you press "Get
+DraftKings prices" on a game, which makes the free key last about 50 checks. The key is stored only on the
 device (`js/odds.js` sends it to the odds service and nowhere else).
 
 ## The model (`js/model.js`)
