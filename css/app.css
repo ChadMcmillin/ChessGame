@@ -148,6 +148,12 @@ button.link { color: var(--green); text-decoration: underline; padding: 0; font-
 
 .ticket { background: var(--card2); border-radius: 10px; padding: 12px; margin-bottom: 10px; font-size: 13px; } .ticket p { margin: 6px 0 0; color: #b9c4d2; } .ticket ul { margin: 6px 0 0; padding-left: 20px; } .ticket li { margin: 3px 0; font-weight: 600; }
 
+.flow { margin-top: 16px; } .flow .reason { margin: 10px 0 6px; } .flow .spark { height: 44px; background: var(--card2); margin: 8px 0 2px; } .flow .fine { margin: 8px 0 0; }
+.flowbar { display: flex; align-items: center; gap: 10px; margin-top: 12px; font-size: 12px; font-weight: 700; }
+.track { flex: 1; height: 8px; border-radius: 4px; background: linear-gradient(90deg, var(--card2), var(--line) 50%, var(--card2)); position: relative; }
+.track::before { content: ''; position: absolute; left: 50%; top: -3px; width: 1px; height: 14px; background: var(--muted); }
+.track i { position: absolute; top: -4px; width: 16px; height: 16px; margin-left: -8px; border-radius: 50%; background: var(--green); border: 2px solid var(--bg); }
+
 #toast { position: fixed; z-index: 20; left: 12px; right: 12px; top: calc(10px + var(--sat)); max-width: 616px; margin: 0 auto; padding: 14px 16px; border-radius: 13px; background: var(--gold); color: #2a1d00; font-weight: 700; text-align: left; box-shadow: 0 8px 30px rgba(0, 0, 0, .5); transform: translateY(-160%); transition: transform .25s ease; }
 #toast.show { transform: none; }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }

@@ -1,9 +1,9 @@
-import * as api from './espn.js?v=9';
-import * as odds from './odds.js?v=9';
+import * as api from './espn.js?v=12';
+import * as odds from './odds.js?v=12';
 import {
-  buildRatings, evaluateGame, evaluateProps, evaluateTeamTotals, rankPicks, rankLeads, settle, gradeAt, buildParlay,
+  buildRatings, evaluateGame, evaluateProps, evaluateTeamTotals, rankPicks, rankLeads, settle, gradeAt, buildParlay, impliedProb,
   fmtOdds, fmtLine, PROP_TYPES, MILESTONE_TYPES, TD_TYPES,
-} from './model.js?v=9';
+} from './model.js?v=12';
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -23,7 +23,7 @@ const S = {
   dk: ls.get('dk', {}), dkMeta: ls.get('dkMeta', {}), dkStop: false, opened: new Set(), known: new Set(), armed: false,
   tab: 'picks', filter: 'all', open: null, sub: 'props', pf: 'all',
   parlay: { n: 3, mode: 'safe', skip: new Set() },
-  bets: ls.get('bets', []), pre: ls.get('pre', {}),
+  bets: ls.get('bets', []), pre: ls.get('pre', {}), hist: ls.get('hist', {}),
   updated: 0, error: null, loading: new Set(),
 };
 
@@ -45,10 +45,29 @@ async function tick() {
   try {
     S.games = sb.games.sort((a, b) => order(a) - order(b) || Date.parse(a.date) - Date.parse(b.date));
     S.week = sb.week; S.error = null; S.updated = Date.now();
+    // Live games: pull DraftKings' in-game lines (the scoreboard stops carrying odds at kickoff).
+    await Promise.allSettled(S.games.filter((g) => g.state === 'in').map(async (g) => {
+      const lo = await api.liveOdds(g.id);
+      if (!lo) return;
+      g.odds = lo;
+      if (lo.open.spreadHome != null) S.pre[g.id] ??= { spreadHome: lo.open.spreadHome, total: lo.open.total };
+    }));
     for (const g of S.games) {
       // Remember the closing pregame line; it anchors the live projection after kickoff.
       if (g.state === 'pre' && g.odds?.spreadHome != null) S.pre[g.id] = { spreadHome: g.odds.spreadHome, total: g.odds.total };
     }
+    // Log every line change so money movement can be followed over time.
+    for (const g of S.games) {
+      const o = g.odds;
+      if (g.state === 'post' || o?.mlHome == null || o?.mlAway == null) continue;
+      const h = (S.hist[g.id] ??= []), last = h[h.length - 1];
+      if (!last || last.s !== o.spreadHome || last.tot !== o.total || last.mh !== o.mlHome || last.ma !== o.mlAway) {
+        h.push({ t: Date.now(), s: o.spreadHome, tot: o.total, mh: o.mlHome, ma: o.mlAway });
+        if (h.length > 80) h.splice(1, h.length - 80); // keep the first reading and the latest 79
+      }
+    }
+    for (const k of Object.keys(S.hist)) if (S.games.length && !S.games.some((g) => g.id === k && g.state !== 'post')) delete S.hist[k];
+    ls.set('hist', S.hist);
     ls.set('pre', Object.fromEntries(Object.entries(S.pre).slice(-40)));
     // Entered prices only make sense while their game is still on the board.
     const onBoard = new Set(S.games.filter((g) => g.state !== 'post').map((g) => g.id));
@@ -356,6 +375,42 @@ function spark(wp, g) {
   return `<div class="sparkwrap"><small>${esc(g.home.abbr)} win probability</small><svg class="spark" viewBox="0 0 100 30" preserveAspectRatio="none"><line x1="0" y1="15" x2="100" y2="15" stroke="rgba(255,255,255,.18)" stroke-width=".4" stroke-dasharray="1.5"/><polyline points="${pts}" fill="none" stroke="#3ddc84" stroke-width="1.2" vector-effect="non-scaling-stroke"/></svg></div>`;
 }
 
+// Sportsbooks don't publish dollars wagered, but money leaves a footprint: books move the line toward
+// the side taking the money. This reads that footprint from the opening line and every change since.
+const noVig = (mh, ma) => { const a = impliedProb(mh), b = impliedProb(ma); return a / (a + b); };
+function moneyFlow(g) {
+  const o = g.odds;
+  if (g.state === 'post' || !o || o.mlHome == null || o.mlAway == null) return '';
+  const H = g.home, A = g.away, now = noVig(o.mlHome, o.mlAway);
+  const h = S.hist[g.id] || [];
+  const open = o.open?.mlHome != null && o.open?.mlAway != null ? noVig(o.open.mlHome, o.open.mlAway) : h.length ? noVig(h[0].mh, h[0].ma) : now;
+  const shift = (now - open) * 100; // points of win probability the market has moved toward the home team
+  const side = Math.abs(shift) < 1 ? null : shift > 0 ? H : A;
+  const strength = Math.abs(shift) >= 8 ? 'Heavy' : Math.abs(shift) >= 4 ? 'Steady' : 'Light';
+  const rows = [];
+  if (o.open?.mlHome != null) rows.push(['Moneyline', `${H.abbr} ${fmtOdds(o.open.mlHome)} → ${fmtOdds(o.mlHome)}`, `${A.abbr} ${fmtOdds(o.open.mlAway)} → ${fmtOdds(o.mlAway)}`]);
+  if (o.open?.spreadHome != null && o.spreadHome != null) rows.push(['Spread', `${H.abbr} ${fmtLine(o.open.spreadHome)} → ${fmtLine(o.spreadHome)}`, o.spreadHome === o.open.spreadHome ? 'no move' : `toward ${o.spreadHome < o.open.spreadHome ? H.abbr : A.abbr}`]);
+  if (o.open?.total != null && o.total != null) rows.push(['Total', `${o.open.total} → ${o.total}`, o.total === o.open.total ? 'no move' : `${o.total > o.open.total ? 'Over' : 'Under'} money`]);
+  // Recent direction: the last change logged while the app has been watching.
+  let recent = '';
+  if (h.length > 1) {
+    const a = h[h.length - 2], b = h[h.length - 1], d = (noVig(b.mh, b.ma) - noVig(a.mh, a.ma)) * 100;
+    const what = Math.abs(d) >= 0.3 ? `toward ${d > 0 ? H.abbr : A.abbr}` : b.tot !== a.tot ? `total ${b.tot > a.tot ? 'up' : 'down'} to ${b.tot}` : 'small price change';
+    recent = `<p class="reason">Latest move ${ago(b.t)}: ${what}. ${h.length - 1} line change${h.length > 2 ? 's' : ''} logged since ${new Date(h[0].t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.</p>`;
+  }
+  const pts = h.length > 2 ? h.map((x, i) => `${((i / (h.length - 1)) * 100).toFixed(1)},${(30 - noVig(x.mh, x.ma) * 30).toFixed(1)}`).join(' ') : '';
+  const pos = Math.max(4, Math.min(96, 50 + shift * 3)); // marker: centre = no movement
+  return `<div class="card flow">
+    <div class="row"><b class="grow">${g.state === 'in' ? 'How the live line has moved' : 'Where the money is going'}</b><span class="tag ${side ? 'gB' : ''}">${side ? `${strength} · ${esc(side.abbr)}` : 'Balanced'}</span></div>
+    <div class="flowbar"><span>${esc(A.abbr)}</span><div class="track"><i style="left:${pos}%"></i></div><span>${esc(H.abbr)}</span></div>
+    <p class="reason">${side ? `${g.state === 'in' ? 'Since kickoff' : 'Since the line opened'}, the market has moved <b>${Math.abs(shift).toFixed(1)} points of win chance toward ${esc(side.name)}</b> (${esc(H.abbr)} ${pct(open)} → ${pct(now)}).` : `The market has barely moved since ${g.state === 'in' ? 'kickoff' : 'the line opened'} (${esc(H.abbr)} ${pct(open)} → ${pct(now)}).`}</p>
+    ${rows.map(([k, a, b]) => `<div class="prow"><span class="muted" style="width:76px">${k}</span><span class="grow">${esc(a)}</span><span class="muted">${esc(b)}</span></div>`).join('')}
+    ${pts ? `<svg class="spark" viewBox="0 0 100 30" preserveAspectRatio="none"><polyline points="${pts}" fill="none" stroke="#6ab0ff" stroke-width="1.2" vector-effect="non-scaling-stroke"/></svg>` : ''}
+    ${recent}
+    <p class="fine">${g.state === 'in' ? 'During a game the line mostly follows the score and clock, so read this as the market’s live view of the game rather than as betting money. Before kickoff it tracks where the money went.' : 'DraftKings doesn’t publish the dollars bet on each side, so this tracks line movement instead: books shift the line toward the side taking the money. Updates with every line change while the app is open.'}</p>
+  </div>`;
+}
+
 function viewDetail(g) {
   const e = S.ev[g.id] || {}, d = S.data[g.id] || {}, o = g.odds, s = g.situation;
   const wpHome = g.state === 'in' ? e.proj?.pWin : d.sum?.predictor?.home != null ? d.sum.predictor.home / 100 : null;
@@ -370,7 +425,8 @@ function viewDetail(g) {
     ${g.state !== 'pre' ? spark(d.sum?.wp, g) : ''}
     ${o && o.spreadHome != null ? `<table class="lines"><tr><th>DraftKings</th><th>Spread</th><th>Total</th><th>Money</th></tr>
       <tr><td>${esc(g.away.abbr)}</td><td>${fmtLine(-o.spreadHome)} <small>${fmtOdds(o.spreadAwayPrice)}</small></td><td>O ${o.total} <small>${fmtOdds(o.overPrice)}</small></td><td>${fmtOdds(o.mlAway)}</td></tr>
-      <tr><td>${esc(g.home.abbr)}</td><td>${fmtLine(o.spreadHome)} <small>${fmtOdds(o.spreadHomePrice)}</small></td><td>U ${o.total} <small>${fmtOdds(o.underPrice)}</small></td><td>${fmtOdds(o.mlHome)}</td></tr></table>` : ''}`;
+      <tr><td>${esc(g.home.abbr)}</td><td>${fmtLine(o.spreadHome)} <small>${fmtOdds(o.spreadHomePrice)}</small></td><td>U ${o.total} <small>${fmtOdds(o.underPrice)}</small></td><td>${fmtOdds(o.mlHome)}</td></tr></table>` : ''}
+    ${moneyFlow(g)}`;
 
   const tabs = [['props', 'Props'], ['parlay', 'Parlay'], ['bets', 'Bets'], ['drives', 'Drives'], ['intel', 'Intel']]
     .map(([k, t]) => `<button class="seg ${S.sub === k ? 'on' : ''}" data-act="sub" data-s="${k}">${t}</button>`).join('');

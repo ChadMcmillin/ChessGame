@@ -11,6 +11,9 @@ best-value bets against DraftKings lines: spreads, totals, moneylines, team tota
 - **Games** – live scores, possession, down and distance, and current DraftKings lines.
 - **Game tracker** – field position graphic, last play, live win probability and its chart,
   drive-by-drive log, the full prop board, injuries, line movement and team stats.
+- **Money movement** – per game, how far the DraftKings line has moved since it opened and every
+  change logged while the app is open. DraftKings does not publish dollars wagered, so line
+  movement is used as the footprint of where the money went.
 - **Parlay builder** – inside any game, choose how many legs (2–8) and Safer or Value; it picks
   the legs from that game only, shows the chance to hit and the fair price, and lets you swap legs.
 - **My Bets** – track any suggestion; it is followed live and graded when the game ends.
@@ -35,6 +38,7 @@ DraftKings as its odds provider:
 | Data | Source |
 | --- | --- |
 | Scores, clock, possession, spread / total / moneyline with DraftKings prices | scoreboard |
+| DraftKings in-game spread / total / moneyline (the scoreboard drops odds at kickoff) | core odds, "Live Odds" provider |
 | Drives, plays, box score, win probability, injuries | game summary |
 | DraftKings prop lines (player and team) | odds `propBets` |
 | Player game logs, rosters | athlete and team endpoints |

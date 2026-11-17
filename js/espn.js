@@ -109,6 +109,35 @@ function normEvent(e) {
   };
 }
 
+// Once a game kicks off the scoreboard drops its odds; DraftKings' in-game lines live on the core
+// endpoint under a separate "Live Odds" provider (id 200). That endpoint is CDN-cached for ~10
+// minutes, so a changing query string is added to get current numbers.
+export function liveOdds(id) {
+  return cached(`live:${id}`, 9000, async () => {
+    const d = await getJson(`${CORE}/events/${id}/competitions/${id}/odds?t=${Math.floor(Date.now() / 10000)}`);
+    const live = (d.items || []).find((x) => x.provider?.id === '200'), close = (d.items || []).find((x) => x.provider?.id === DK);
+    if (!live || live.spread == null || live.homeTeamOdds?.moneyLine == null) return null;
+    const h = live.homeTeamOdds, a = live.awayTeamOdds || {}, slip = {};
+    let link;
+    for (const l of live.links || []) {
+      const url = decodeURIComponent((l.href || '').match(/preurl=([^&]+)/)?.[1] || '');
+      const code = url.match(/outcomes=(\w+)/)?.[1];
+      if (!code) continue;
+      link ??= url.split('?')[0];
+      const first = code.endsWith('_1'), kind = code.startsWith('0ML') ? 'ml' : code.startsWith('0HC') ? 'spread' : code.startsWith('0OU') ? 'total' : null;
+      if (kind) slip[`${kind}|${kind === 'total' ? (first ? 'over' : 'under') : first ? 'home' : 'away'}`] = code;
+    }
+    return {
+      provider: 'DraftKings', live: true, link, slip,
+      spreadHome: live.spread, spreadHomePrice: h.spreadOdds ?? null, spreadAwayPrice: a.spreadOdds ?? null,
+      total: live.overUnder ?? null, overPrice: live.overOdds ?? null, underPrice: live.underOdds ?? null,
+      mlHome: h.moneyLine, mlAway: a.moneyLine ?? null,
+      // "open" for a live game is the pregame closing line.
+      open: { spreadHome: close?.spread ?? null, total: close?.overUnder ?? null, mlHome: close?.homeTeamOdds?.moneyLine ?? null, mlAway: close?.awayTeamOdds?.moneyLine ?? null },
+    };
+  });
+}
+
 export async function scoreboard() {
   const d = await getJson(`${SITE}/scoreboard`);
   return { season: d.season?.year, seasonType: d.season?.type, week: d.week?.number, games: (d.events || []).flatMap((e) => { try { return [normEvent(e)]; } catch (err) { console.error('skipped a game the feed sent in an unexpected shape', err); return []; } }) };
