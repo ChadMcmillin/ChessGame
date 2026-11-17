@@ -1,9 +1,9 @@
-import * as api from './espn.js?v=8';
-import * as odds from './odds.js?v=8';
+import * as api from './espn.js?v=9';
+import * as odds from './odds.js?v=9';
 import {
   buildRatings, evaluateGame, evaluateProps, evaluateTeamTotals, rankPicks, rankLeads, settle, gradeAt, buildParlay,
   fmtOdds, fmtLine, PROP_TYPES, MILESTONE_TYPES, TD_TYPES,
-} from './model.js?v=8';
+} from './model.js?v=9';
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -199,7 +199,15 @@ const isProp = (p) => p.market === 'prop' || p.market === 'td' || p.market === '
 const allPicks = () => Object.values(S.ev).flatMap((e) => e.picks);
 const findPick = (key) => allPicks().find((p) => p.key === key);
 const isTracked = (p) => S.bets.some((b) => (b.pick || b.id) === p.key && !b.final);
-const dkLink = (g) => (g?.odds?.link ? `<a class="btn ghost" href="${esc(g.odds.link)}" target="_blank" rel="noopener" data-act="ext">Open in DraftKings ↗</a>` : '');
+// Link to the game in DraftKings. Game-line bets (spread, total, moneyline) are added to the slip
+// automatically; the feed has no slip ids for props, so those have to be added by hand.
+const slipId = (g, p) => g?.odds?.slip?.[`${p.market}|${p.side}`] || null;
+function dkLink(g, legs = [], label) {
+  if (!g?.odds?.link) return '';
+  const ids = legs.map((p) => slipId(g, p)).filter(Boolean);
+  const href = g.odds.link + (ids.length ? `?outcomes=${ids.join('+')}` : '');
+  return `<a class="btn ghost" href="${esc(href)}" target="_blank" rel="noopener" data-act="ext">${label || (ids.length ? 'Add to DraftKings slip ↗' : 'Open in DraftKings ↗')}</a>`;
+}
 
 function pickCard(p, compact) {
   const g = S.games.find((x) => x.id === p.gameId);
@@ -235,7 +243,7 @@ function pickCard(p, compact) {
     </div>
     <p class="reason">${esc(p.reason)}</p>
     <div class="actions">
-      <button class="btn ${tracked ? 'on' : ''}" data-act="track" data-key="${esc(p.key)}">${tracked ? '✓ Tracking' : '＋ Track bet'}</button>${dkLink(g)}
+      <button class="btn ${tracked ? 'on' : ''}" data-act="track" data-key="${esc(p.key)}">${tracked ? '✓ Tracking' : '＋ Track bet'}</button>${dkLink(g, [p])}
     </div>
   </article>`;
 }
@@ -421,8 +429,16 @@ function viewParlay(g, e, d) {
         ${r.priced ? `<div><small>Legs multiply to</small><b>${fmtOdds(r.payout)}</b></div><div><small>Edge</small><b class="${r.ev > 0 ? 'pos' : 'neg'}">${r.ev > 0 ? '+' : ''}${(r.ev * 100).toFixed(0)}%</b></div>`
           : `<div><small>Bet it if DraftKings pays</small><b>more than ${fmtOdds(r.fair)}</b></div>`}
       </div>
-      <p class="reason">Build these ${r.legs.length} legs in DraftKings’ Same Game Parlay and compare its price with the fair price above. DraftKings prices a same-game parlay as a bundle, usually below what the legs multiply to${r.priced ? '' : '; add leg prices for a closer estimate'}.</p>
-      <div class="actions">${dkLink(g)}${P.skip.size ? '<button class="btn ghost" data-act="preset">Undo swaps</button>' : ''}</div>
+      <p class="reason">Compare DraftKings’ Same Game Parlay price with the fair price above. DraftKings prices a same-game parlay as a bundle, usually below what the legs multiply to${r.priced ? '' : '; add leg prices for a closer estimate'}.</p>
+      ${(() => {
+        const auto = r.legs.filter((l) => slipId(g, l)), manual = r.legs.filter((l) => !slipId(g, l));
+        return `<div class="ticket"><b>To build this in DraftKings</b>
+          ${auto.length ? `<p>① Tap the button below. It opens the game with ${auto.map((l) => esc(l.label)).join(' and ')} already on your slip.</p>` : '<p>① Tap the button below to open the game.</p>'}
+          ${manual.length ? `<p>② Add ${manual.length > 1 ? 'these' : 'this'} yourself — DraftKings gives no shortcut for player props:</p><ul>${manual.map((l) => `<li>${esc(l.label)}</li>`).join('')}</ul>` : ''}
+          </div>
+          <div class="actions">${dkLink(g, auto, auto.length ? `Open DraftKings with ${auto.length} leg${auto.length > 1 ? 's' : ''} ↗` : 'Open game in DraftKings ↗')}<button class="btn ghost" data-act="copylegs" data-t="${esc(r.legs.map((l) => l.label).join('\n'))}">Copy legs</button></div>
+          ${P.skip.size ? '<div class="actions"><button class="btn ghost" data-act="preset">Undo swaps</button></div>' : ''}`;
+      })()}
     </div>`;
   return `${controls}${r.short ? `<p class="fine">Only ${r.legs.length} leg${r.legs.length > 1 ? 's' : ''} clear the bar right now, so this is shorter than ${P.n}.</p>` : ''}
     <div class="card">${legs}</div>${sum}
@@ -553,6 +569,7 @@ document.addEventListener('click', (ev) => {
   if (act === 'legs') { S.parlay.n = Math.max(2, Math.min(8, S.parlay.n + Number(el.dataset.d))); return render(); }
   if (act === 'pmode') { S.parlay.mode = el.dataset.m; S.parlay.skip = new Set(); return render(); }
   if (act === 'swap') { ev.stopPropagation(); S.parlay.skip.add(el.dataset.key); return render(); }
+  if (act === 'copylegs') { navigator.clipboard?.writeText(el.dataset.t).then(() => { el.textContent = 'Copied ✓'; }, () => { el.textContent = 'Copy failed'; }); return; }
   if (act === 'preset') { S.parlay.skip = new Set(); return render(); }
   if (act === 'close') { S.open = null; history.state?.sheet && history.back(); return render(); }
   if (act === 'open' || act === 'toast') {

@@ -75,6 +75,9 @@ function normOdds(list) {
     link: (cur(ml?.home)?.link?.href || o.links?.[0]?.href || '').match(/preurl=([^&]+)/)?.[1],
   };
   if (out.link) out.link = decodeURIComponent(out.link).split('?')[0];
+  // DraftKings' own ids for each game-line selection; adding them to the link pre-fills the bet slip.
+  const oc = (x) => { try { return decodeURIComponent(cur(x)?.link?.href || '').match(/outcomes=([\w]+)/)?.[1] || null; } catch { return null; } };
+  out.slip = { 'ml|home': oc(ml?.home), 'ml|away': oc(ml?.away), 'spread|home': oc(ps?.home), 'spread|away': oc(ps?.away), 'total|over': oc(tot?.over), 'total|under': oc(tot?.under) };
   return out;
 }
 
