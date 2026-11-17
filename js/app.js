@@ -1,9 +1,9 @@
-import * as api from './espn.js?v=12';
-import * as odds from './odds.js?v=12';
+import * as api from './espn.js?v=13';
+import * as odds from './odds.js?v=13';
 import {
   buildRatings, evaluateGame, evaluateProps, evaluateTeamTotals, rankPicks, rankLeads, settle, gradeAt, buildParlay, impliedProb,
   fmtOdds, fmtLine, PROP_TYPES, MILESTONE_TYPES, TD_TYPES,
-} from './model.js?v=12';
+} from './model.js?v=13';
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
