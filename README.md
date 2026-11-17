@@ -11,6 +11,8 @@ best-value bets against DraftKings lines: spreads, totals, moneylines, team tota
 - **Games** – live scores, possession, down and distance, and current DraftKings lines.
 - **Game tracker** – field position graphic, last play, live win probability and its chart,
   drive-by-drive log, the full prop board, injuries, line movement and team stats.
+- **Parlay builder** – inside any game, choose how many legs (2–8) and Safer or Value; it picks
+  the legs from that game only, shows the chance to hit and the fair price, and lets you swap legs.
 - **My Bets** – track any suggestion; it is followed live and graded when the game ends.
 
 ## Run it

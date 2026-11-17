@@ -496,3 +496,34 @@ export function settle(bet, g, box) {
   const shown = bet.market === 'td' || bet.market === 'ms' ? target + 0.5 : target;
   return { status, cur, target: shown, winning: over ? cur > target : cur < target };
 }
+
+// ---------- same-game parlay builder ----------
+// Picks n legs from one game's evaluated bets. mode 'safe' takes the likeliest legs, 'value' the
+// biggest edges. One leg per player, one per market, and never both the spread and the moneyline.
+export function buildParlay(picks, n, mode = 'safe', skip = new Set()) {
+  const legProb = (p) => (p.price != null ? p.prob : Math.min(0.8, 0.5 + 0.6 * (p.model - 0.5))); // unpriced: tempered model
+  const score = (p) => {
+    if (mode === 'safe') return legProb(p);
+    if (p.ev != null) return p.ev;
+    return p.balanced ? 0.5 * (legProb(p) / impliedProb(EST_PROP_PRICE) - 1) : -1; // no way to judge value on a lopsided unpriced line
+  };
+  const group = (p) => (p.market === 'spread' || p.market === 'ml' ? 'winner' : p.athleteId ? `pl${p.athleteId}` : `${p.market}${p.typeId || ''}`);
+  // Stick to the markets people actually parlay: game lines, team totals, yards, catches, carries, TDs.
+  const MAIN = ['8', '9', '10', '16', '18', '11', '12', '13', '14', '20'];
+  const pool = picks.filter((p) => (p.market !== 'prop' || MAIN.includes(p.typeId)) && (p.market !== 'td' || p.typeId === '31'))
+    .filter((p) => !p.suspect && !p.stale && p.market !== 'ms' && !skip.has(p.key) && legProb(p) >= (mode === 'safe' ? 0.55 : 0.4) && score(p) > -1)
+    .sort((a, b) => score(b) - score(a));
+  const legs = [], used = new Set();
+  for (const p of pool) {
+    if (legs.length >= n) break;
+    const k = group(p);
+    if (used.has(k) || (p.market === 'td' && used.has('td'))) continue;
+    used.add(k); if (p.market === 'td') used.add('td');
+    legs.push({ ...p, legProb: legProb(p) });
+  }
+  const prob = legs.reduce((t, l) => t * l.legProb, 1);
+  const priced = legs.length > 0 && legs.every((l) => l.price != null);
+  const dec = priced ? legs.reduce((t, l) => t * toDecimal(l.price), 1) : null;
+  return { legs, prob, fair: legs.length ? probToAmerican(clamp(prob, 0.001, 0.999)) : null, priced,
+    payout: dec ? probToAmerican(1 / dec) : null, ev: dec ? prob * dec - 1 : null, short: legs.length < n };
+}

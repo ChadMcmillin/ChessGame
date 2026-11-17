@@ -139,3 +139,28 @@ test('touchdown scorers: plus-money prices do not turn into giant edges', () => 
   const many = Array.from({ length: 6 }, (_, i) => ({ ...at(400), gameId: 'g' + i, grade: 'B', ev: 0.05 }));
   assert.equal(m.rankPicks(many).length, 2);
 });
+
+test('parlay builder: right number of legs, no clashing legs', () => {
+  const mk = (o) => ({ key: Math.random() + '', price: -110, prob: 0.6, model: 0.6, ev: 0.05, ...o });
+  const picks = [
+    mk({ market: 'ml', side: 'home', prob: 0.7, price: -225 }), mk({ market: 'spread', side: 'home', prob: 0.56 }),
+    mk({ market: 'total', side: 'under', prob: 0.58 }), mk({ market: 'total', side: 'over', prob: 0.42 }),
+    mk({ market: 'prop', athleteId: 'a', typeId: '12', prob: 0.62 }), mk({ market: 'prop', athleteId: 'a', typeId: '13', prob: 0.61 }),
+    mk({ market: 'prop', athleteId: 'b', typeId: '13', price: null, ev: null, model: 0.9, balanced: true }),
+    mk({ market: 'prop', athleteId: 'c', typeId: '13', suspect: true, prob: 0.95 }),
+    mk({ market: 'td', athleteId: 'd', typeId: '31', prob: 0.6 }), mk({ market: 'td', athleteId: 'e', typeId: '31', prob: 0.59 }),
+  ];
+  const r = m.buildParlay(picks, 4, 'safe');
+  assert.equal(r.legs.length, 4);
+  assert.equal(r.legs.filter((l) => l.market === 'ml' || l.market === 'spread').length, 1);
+  assert.equal(new Set(r.legs.map((l) => l.athleteId || l.market)).size, 4);
+  assert.ok(!r.legs.some((l) => l.suspect));
+  assert.ok(r.legs.find((l) => l.athleteId === 'b').legProb <= 0.8, 'unpriced legs are tempered');
+  near(r.prob, r.legs.reduce((t, l) => t * l.legProb, 1), 1e-9);
+  assert.ok(!r.priced && r.payout === null);
+  const priced = m.buildParlay(picks.filter((p) => p.price != null), 2, 'safe');
+  assert.ok(priced.priced && priced.payout > 0);
+  const swapped = m.buildParlay(picks, 4, 'safe', new Set([r.legs[0].key]));
+  assert.ok(!swapped.legs.some((l) => l.key === r.legs[0].key));
+  assert.ok(m.buildParlay(picks, 8, 'safe').short);
+});

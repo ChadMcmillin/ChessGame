@@ -1,9 +1,9 @@
-import * as api from './espn.js?v=6';
-import * as odds from './odds.js?v=6';
+import * as api from './espn.js?v=8';
+import * as odds from './odds.js?v=8';
 import {
-  buildRatings, evaluateGame, evaluateProps, evaluateTeamTotals, rankPicks, rankLeads, settle, gradeAt,
+  buildRatings, evaluateGame, evaluateProps, evaluateTeamTotals, rankPicks, rankLeads, settle, gradeAt, buildParlay,
   fmtOdds, fmtLine, PROP_TYPES, MILESTONE_TYPES, TD_TYPES,
-} from './model.js?v=6';
+} from './model.js?v=8';
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -21,7 +21,8 @@ const S = {
   // Live DraftKings prop prices (optional, needs the user's Odds API key).
   cfg: { key: '', set: 'core', speed: 'balanced', scope: 'all', ...ls.get('cfg', {}) },
   dk: ls.get('dk', {}), dkMeta: ls.get('dkMeta', {}), dkStop: false, opened: new Set(), known: new Set(), armed: false,
-  tab: 'picks', filter: 'all', open: null, sub: 'bets',
+  tab: 'picks', filter: 'all', open: null, sub: 'props', pf: 'all',
+  parlay: { n: 3, mode: 'safe', skip: new Set() },
   bets: ls.get('bets', []), pre: ls.get('pre', {}),
   updated: 0, error: null, loading: new Set(),
 };
@@ -264,7 +265,7 @@ function viewPicks() {
         ? 'Pulling DraftKings lines, team results and player game logs.'
         : S.games.some((g) => g.state !== 'post') ? `Checked ${S.scanned} markets and nothing with a confirmed price clears the bar. This list updates on its own as lines and games move.`
           : 'No upcoming or live games on the board this week.'}</p></div>`;
-    if (leads.length) body += LEADS_NOTE + leads.slice(0, 15).map((p) => pickCard(p)).join('');
+    if (leads.length) body += `<p class="fine">${leads.length} more prop lean${leads.length > 1 ? 's' : ''} without a DraftKings price yet. Open a game to see its props.</p>`;
   }
   return `<div class="chips">${chips}</div>
     <div class="scanline">${loading ? '<i class="spin"></i>' : '<i class="dot"></i>'} ${S.scanned} markets checked · ${S.games.filter((g) => g.state === 'in').length} live, ${S.games.filter((g) => g.state === 'pre').length} upcoming</div>
@@ -363,7 +364,7 @@ function viewDetail(g) {
       <tr><td>${esc(g.away.abbr)}</td><td>${fmtLine(-o.spreadHome)} <small>${fmtOdds(o.spreadAwayPrice)}</small></td><td>O ${o.total} <small>${fmtOdds(o.overPrice)}</small></td><td>${fmtOdds(o.mlAway)}</td></tr>
       <tr><td>${esc(g.home.abbr)}</td><td>${fmtLine(o.spreadHome)} <small>${fmtOdds(o.spreadHomePrice)}</small></td><td>U ${o.total} <small>${fmtOdds(o.underPrice)}</small></td><td>${fmtOdds(o.mlHome)}</td></tr></table>` : ''}`;
 
-  const tabs = [['bets', 'Best bets'], ['props', 'Props'], ['drives', 'Drives'], ['intel', 'Intel']]
+  const tabs = [['props', 'Props'], ['parlay', 'Parlay'], ['bets', 'Bets'], ['drives', 'Drives'], ['intel', 'Intel']]
     .map(([k, t]) => `<button class="seg ${S.sub === k ? 'on' : ''}" data-act="sub" data-s="${k}">${t}</button>`).join('');
   let body = '';
   if (S.sub === 'bets') {
@@ -373,6 +374,7 @@ function viewDetail(g) {
         : `<div class="empty ${leads.length ? 'slim' : ''}"><b>${S.loading.has(g.id) || !S.ratings ? 'Researching…' : 'No graded bet on this game right now'}</b><p>${!o ? 'DraftKings has not posted lines yet.' : 'The spread, total and moneyline are priced within the model’s margin of error. They are re-checked on every update.'}</p></div>`)
         + (leads.length ? LEADS_NOTE + leads.slice(0, 8).map((p) => pickCard(p, true)).join('') : '');
   } else if (S.sub === 'props') body = viewProps(g, e, d);
+  else if (S.sub === 'parlay') body = viewParlay(g, e, d);
   else if (S.sub === 'drives') {
     const dr = (d.sum?.drives || []).slice().reverse();
     body = dr.length ? dr.map((x) => `<div class="drive"><div class="row"><b>${esc(x.team)}</b><span class="grow muted">${esc(x.desc)}</span><span class="tag ${x.score ? 'gB' : ''}">${esc(x.result)}</span></div>
@@ -397,6 +399,36 @@ const groupBy = (list, fn) => {
   return m;
 };
 
+const CATS = { pass: ['8', '9', '10', '15', '16', '17', '18', '194'], rush: ['11', '12', '20', '21', '196', '197', '201'], rec: ['13', '14', '19', '195', '202'] };
+const catOf = (p) => (p.market === 'td' ? 'td' : p.market === 'teamtotal' ? 'other' : Object.keys(CATS).find((c) => CATS[c].includes(p.typeId)) || 'other');
+
+function viewParlay(g, e, d) {
+  if (g.state === 'post') return '<div class="empty"><p>This game is final.</p></div>';
+  const P = S.parlay, r = buildParlay(e.picks || [], P.n, P.mode, P.skip);
+  const controls = `<div class="card pctl">
+      <div class="row"><span class="grow"><b>Legs</b></span><button class="step" data-act="legs" data-d="-1" aria-label="Fewer legs">−</button><b class="stepn">${P.n}</b><button class="step" data-act="legs" data-d="1" aria-label="More legs">+</button></div>
+      <div class="opts"><button class="${P.mode === 'safe' ? 'on' : ''}" data-act="pmode" data-m="safe">Safer · likeliest legs</button><button class="${P.mode === 'value' ? 'on' : ''}" data-act="pmode" data-m="value">Value · biggest edges</button></div>
+    </div>`;
+  if (!r.legs.length) return `${controls}<div class="empty"><b>${!d.ready && !e.picks?.length ? 'Researching this game…' : 'Nothing solid enough to parlay yet'}</b><p>${P.mode === 'value' ? 'Value mode needs real prices or near-even lines. Try Safer, or enter DraftKings prices on the Props tab.' : 'Legs appear once lines are posted and the model has a lean of 55% or better.'}</p></div>`;
+  const legs = r.legs.map((l, i) => `<div class="prow leg">
+      <b class="legn">${i + 1}</b>
+      <span class="grow">${esc(l.label)}<small class="blk">${pct(l.legProb)} to hit · ${l.price != null ? `DraftKings ${fmtOdds(l.price)}` : `<button class="link" data-act="price" data-key="${esc(l.key)}">add DraftKings price</button>`}</small></span>
+      <button class="swapb" data-act="swap" data-key="${esc(l.key)}" aria-label="Swap this leg">Swap</button></div>`).join('');
+  const sum = `<div class="card psum">
+      <div class="stats ${r.priced ? '' : 'three'}">
+        <div><small>Chance to hit</small><b>${(r.prob * 100).toFixed(r.prob < 0.1 ? 1 : 0)}%</b></div>
+        <div><small>Fair price</small><b>${fmtOdds(r.fair)}</b></div>
+        ${r.priced ? `<div><small>Legs multiply to</small><b>${fmtOdds(r.payout)}</b></div><div><small>Edge</small><b class="${r.ev > 0 ? 'pos' : 'neg'}">${r.ev > 0 ? '+' : ''}${(r.ev * 100).toFixed(0)}%</b></div>`
+          : `<div><small>Bet it if DraftKings pays</small><b>more than ${fmtOdds(r.fair)}</b></div>`}
+      </div>
+      <p class="reason">Build these ${r.legs.length} legs in DraftKings’ Same Game Parlay and compare its price with the fair price above. DraftKings prices a same-game parlay as a bundle, usually below what the legs multiply to${r.priced ? '' : '; add leg prices for a closer estimate'}.</p>
+      <div class="actions">${dkLink(g)}${P.skip.size ? '<button class="btn ghost" data-act="preset">Undo swaps</button>' : ''}</div>
+    </div>`;
+  return `${controls}${r.short ? `<p class="fine">Only ${r.legs.length} leg${r.legs.length > 1 ? 's' : ''} clear the bar right now, so this is shorter than ${P.n}.</p>` : ''}
+    <div class="card">${legs}</div>${sum}
+    <p class="fine">One leg per player, and never both the spread and the moneyline. The chance to hit treats legs as independent; legs from one game move together, so the true chance can be somewhat higher or lower. More legs means a bigger payout and a much smaller chance.</p>`;
+}
+
 function viewProps(g, e, d) {
   if (g.state === 'post') return '<div class="empty"><p>Props are closed for this game.</p></div>';
   if (!d.props) return `<div class="empty"><i class="spin"></i><p>Loading DraftKings props…</p></div>`;
@@ -407,23 +439,27 @@ function viewProps(g, e, d) {
   const ouRow = (p) => propRow(p, `${esc(p.stat)} <b>${p.line}</b>${p.current != null ? ` <small>has ${p.current}</small>` : ''}
     <small class="blk">${p.side === 'over' ? 'Over' : 'Under'} ${pct(p.model)} · projects ${p.projection.toFixed(1)}${p.stale ? ' · pregame line' : ''}</small>`);
   const order = (rows) => rows.sort((a, b) => !!b.grade - !!a.grade || b.lead - a.lead || b.model - a.model);
-  const players = [...groupBy(order(sides.filter((p) => p.market === 'prop')), (p) => p.athleteId).values()];
+  const f = S.pf, inCat = (p) => f === 'all' || catOf(p) === f;
+  const players = [...groupBy(order(sides.filter((p) => p.market === 'prop' && inCat(p))), (p) => p.athleteId).values()];
   const ou = players.map((rows) => `<div class="card pl"><div class="title">${esc(rows[0].player)} <small>${esc(rows[0].pos)}</small></div>${rows.map(ouRow).join('')}</div>`).join('');
-  const tt = sides.filter((p) => p.market === 'teamtotal');
-  const tds = e.picks.filter((p) => p.market === 'td' && p.typeId === '31').sort((a, b) => b.model - a.model).slice(0, 16);
+  const tt = sides.filter((p) => p.market === 'teamtotal' && inCat(p));
+  const tds = e.picks.filter((p) => p.market === 'td' && p.typeId === '31' && inCat(p)).sort((a, b) => b.model - a.model).slice(0, 16);
   const yes = (p, name) => propRow(p, `${name}<small class="blk">${pct(p.model)} chance · fair ${fmtOdds(p.fair)}</small>`);
-  const lad = [...groupBy(e.picks.filter((p) => p.market === 'ms'), (p) => `${p.player} · ${p.stat}`).entries()].slice(0, 40);
+  const lad = [...groupBy(e.picks.filter((p) => p.market === 'ms' && f !== 'all' && inCat(p)), (p) => `${p.player} · ${p.stat}`).entries()].slice(0, 40);
   const note = e.dk
     ? `<div class="dkbar"><span><i class="dot"></i> <b>Live DraftKings lines and prices</b> · updated ${ago(e.dk)}</span><button class="btn ghost" data-act="dkpull" data-id="${g.id}">Refresh</button></div>
        <p class="fine">Each row shows DraftKings’ price and the edge at that price. Rows without a price can be tapped to enter one.</p>`
     : S.cfg.key && !S.dkStop ? `<div class="dkbar"><span>Lines are from the free feed. Prices not loaded.</span><button class="btn" data-act="dkpull" data-id="${g.id}">Get DraftKings prices · ${odds.SETS[S.cfg.set].length} credits</button></div>
        <p class="fine">Or tap any row to type a price in yourself.</p>`
     : `<p class="fine">These are DraftKings’ lines, but the free feed doesn’t carry its prop prices. Each row shows the worst price still worth betting. <b>Tap a row to enter the price DraftKings is showing</b>, or <button class="link" data-act="settings">turn on live prices</button>.</p>`;
-  return `${note}
+  const pchips = [['all', 'All'], ['pass', 'Passing'], ['rush', 'Rushing'], ['rec', 'Receiving'], ['td', 'Touchdowns'], ['other', 'Defense & kicking']]
+    .map(([k, t]) => `<button class="chip ${f === k ? 'on' : ''}" data-act="pf" data-f="${k}">${t}</button>`).join('');
+  return `<div class="chips">${pchips}</div>${note}
     ${!d.ready ? '<div class="scanline"><i class="spin"></i> Reading player game logs…</div>' : ''}
-    ${ou ? `<h2>Over / under</h2>${ou}` : d.ready ? '<div class="empty"><p>No over/under props posted yet.</p></div>' : ''}
+    ${ou ? `<h2>Over / under</h2>${ou}` : d.ready && f !== 'td' ? '<div class="empty"><p>No over/under props here yet.</p></div>' : ''}
     ${tt.length ? `<h2>Team totals</h2><div class="card">${tt.map((p) => propRow(p, `${esc(p.label.replace(/ (Over|Under) .*/, ''))} <b>${p.line}</b><small class="blk">${p.side === 'over' ? 'Over' : 'Under'} ${pct(p.model)} · projects ${p.projection.toFixed(1)}</small>`)).join('')}</div>` : ''}
     ${tds.length ? `<h2>Anytime touchdown</h2><div class="card">${tds.map((p) => yes(p, `${esc(p.player)} <small>${esc(p.pos)}</small>`)).join('')}</div>` : ''}
+    ${f === 'all' && d.ready ? '<p class="fine">Pick Passing, Rushing or Receiving above to also see milestone ladders.</p>' : ''}
     ${lad.length ? `<h2>Milestones</h2><div class="card">${lad.map(([k, rows]) => `<details><summary>${esc(k)}</summary>${rows.sort((a, b) => a.line - b.line).map((p) => yes(p, `<b>${p.line}+</b>`)).join('')}</details>`).join('')}</div>` : ''}`;
 }
 
@@ -513,11 +549,17 @@ document.addEventListener('click', (ev) => {
   if (act === 'untrack') { ev.stopPropagation(); S.bets = S.bets.filter((b) => b.key !== el.dataset.bet); saveBets(); return render(); }
   if (act === 'filter') { S.filter = el.dataset.f; return render(); }
   if (act === 'sub') { S.sub = el.dataset.s; return render(); }
+  if (act === 'pf') { S.pf = el.dataset.f; return render(); }
+  if (act === 'legs') { S.parlay.n = Math.max(2, Math.min(8, S.parlay.n + Number(el.dataset.d))); return render(); }
+  if (act === 'pmode') { S.parlay.mode = el.dataset.m; S.parlay.skip = new Set(); return render(); }
+  if (act === 'swap') { ev.stopPropagation(); S.parlay.skip.add(el.dataset.key); return render(); }
+  if (act === 'preset') { S.parlay.skip = new Set(); return render(); }
   if (act === 'close') { S.open = null; history.state?.sheet && history.back(); return render(); }
   if (act === 'open' || act === 'toast') {
     const id = el.dataset.id;
     if (!id) return;
-    S.open = id; S.opened.add(id); S.sub = 'bets'; history.pushState({ sheet: 1 }, '');
+    if (S.open !== id) S.parlay.skip = new Set();
+    S.open = id; S.opened.add(id); S.sub = 'props'; S.pf = 'all'; history.pushState({ sheet: 1 }, '');
     render(); $('#sheet').scrollTop = 0;
     const g = S.games.find((x) => x.id === id);
     if (g) loadDeep(g);
